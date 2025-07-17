@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <JUCERPROJECT id="FtFdxS" name="STRETCHER" projectType="guiapp" useAppConfig="0"
-              addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1">
+              addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" headerPath="/opt/homebrew/include">
   <MAINGROUP id="UjrRON" name="STRETCHER">
     <GROUP id="{1ABE4211-986C-9E0C-889D-8C441240D2BC}" name="Source">
       <FILE id="Jmgt7g" name="Main.cpp" compile="1" resource="0" file="Source/Main.cpp"/>
@@ -25,12 +25,12 @@
   </MODULES>
   <JUCEOPTIONS JUCE_STRICT_REFCOUNTEDPOINTER="1"/>
   <EXPORTFORMATS>
-    <XCODE_MAC targetFolder="Builds/MacOSX" externalLibraries="rubberband" extraLinkerFlags="-framework Accelerate -framework CoreFoundation -framework CoreAudio -framework AudioUnit -framework AudioToolbox">
+    <XCODE_MAC targetFolder="Builds/MacOSX" externalLibraries="soundtouch" extraLinkerFlags="-framework Accelerate -framework CoreFoundation -framework CoreAudio -framework AudioUnit -framework AudioToolbox">
       <CONFIGURATIONS>
-        <CONFIGURATION isDebug="1" name="Debug" targetName="STRETCHER" headerPath="/Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0&#10;/Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0/rubberband"
-                       libraryPath="/Volumes/STORAGE/AUDIO-MIDI DEV/STRETCHER/STRETCHER"/>
-        <CONFIGURATION isDebug="0" name="Release" targetName="STRETCHER" headerPath="/Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0&#10;/Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0/rubberband"
-                       libraryPath="/Volumes/STORAGE/AUDIO-MIDI DEV/STRETCHER/STRETCHER"/>
+        <CONFIGURATION isDebug="1" name="Debug" targetName="STRETCHER" headerPath="opt/homebrew/include"
+                       libraryPath="/opt/homebrew/lib"/>
+        <CONFIGURATION isDebug="0" name="Release" targetName="STRETCHER" headerPath="/opt/homebrew/include"
+                       libraryPath="/opt/homebrew/lib"/>
       </CONFIGURATIONS>
       <MODULEPATHS>
         <MODULEPATH id="juce_audio_basics" path="../../../../../Applications/JUCE/modules"/>

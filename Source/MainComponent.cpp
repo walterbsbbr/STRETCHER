@@ -190,20 +190,20 @@ AudioTrack::AudioTrack()
       volume(1.0f)
 {
     formatManager.registerBasicFormats();
+    soundTouch = std::make_unique<soundtouch::SoundTouch>();
 }
 
 AudioTrack::~AudioTrack()
 {
     juce::ScopedLock sl(lock);
     
-    // Clear stretcher first
-    if (stretcher)
+    if (soundTouch)
     {
-        stretcher.reset();
+        soundTouch.reset();
     }
     
-    // Clear audio buffer
     audioBuffer.clear();
+    stretchedBuffer.clear();
 }
 
 void AudioTrack::loadAudioFile(const juce::File& file)
@@ -220,22 +220,30 @@ void AudioTrack::loadAudioFile(const juce::File& file)
         sampleRate = reader->sampleRate;
         fileName = file.getFileNameWithoutExtension();
         currentPosition = 0.0;
+        stretchRatio = 1.0;
         
-        // Generate waveform peaks for visualization
         generateWaveformPeaks();
-        
-        // Detect BPM automatically
         detectedBPM = detectBPM();
+        initializeSoundTouch();
         
-        // Auto-sync to master BPM if detected
-        if (detectedBPM > 0.0)
-        {
-            autoSyncToMaster();
-        }
+        stretchedBuffer.setSize(reader->numChannels, 8192, false, false, true);
         
-        updateStretcher();
-        
-        juce::Logger::writeToLog("Loaded: " + fileName + " - Detected BPM: " + juce::String(detectedBPM, 1));
+        juce::Logger::writeToLog("Loaded: " + fileName +
+                                " - Detected BPM: " + juce::String(detectedBPM, 1) +
+                                " - Stretch Ratio: " + juce::String(stretchRatio, 3) +
+                                " (SoundTouch mode)");
+    }
+}
+
+void AudioTrack::initializeSoundTouch()
+{
+    if (soundTouch && audioBuffer.getNumSamples() > 0)
+    {
+        soundTouch->setSampleRate(static_cast<uint32_t>(sampleRate));
+        soundTouch->setChannels(audioBuffer.getNumChannels());
+        soundTouch->setTempo(stretchRatio);
+        soundTouch->setPitch(1.0);
+        soundTouch->clear();
     }
 }
 
@@ -248,7 +256,7 @@ void AudioTrack::generateWaveformPeaks()
     
     const int numSamples = audioBuffer.getNumSamples();
     const int numChannels = audioBuffer.getNumChannels();
-    const int peaksPerSecond = 100; // Resolution of waveform
+    const int peaksPerSecond = 100;
     const int samplesPerPeak = juce::jmax(1, (int)(sampleRate / peaksPerSecond));
     const int numPeaks = (numSamples + samplesPerPeak - 1) / samplesPerPeak;
     
@@ -261,7 +269,6 @@ void AudioTrack::generateWaveformPeaks()
         
         float maxPeak = 0.0f;
         
-        // Find the maximum peak in this segment across all channels
         for (int channel = 0; channel < numChannels; ++channel)
         {
             const float* channelData = audioBuffer.getReadPointer(channel);
@@ -280,10 +287,23 @@ void AudioTrack::setStretchRatio(double ratio)
 {
     juce::ScopedLock sl(lock);
     
-    if (ratio != stretchRatio)
+    double newRatio = juce::jlimit(0.25, 4.0, ratio);
+    if (std::abs(newRatio - stretchRatio) > 0.001)
     {
-        stretchRatio = ratio;
-        updateStretcher();
+        stretchRatio = newRatio;
+    }
+}
+
+void AudioTrack::scaleStretchRatio(double scaleFactor)
+{
+    juce::ScopedLock sl(lock);
+    
+    double newRatio = stretchRatio * scaleFactor;
+    newRatio = juce::jlimit(0.25, 4.0, newRatio);
+    
+    if (std::abs(newRatio - stretchRatio) > 0.001)
+    {
+        stretchRatio = newRatio;
     }
 }
 
@@ -297,15 +317,14 @@ void AudioTrack::reset()
 {
     juce::ScopedLock sl(lock);
     currentPosition = 0.0;
-    if (stretcher)
-        stretcher->reset();
+    if (soundTouch)
+        soundTouch->clear();
 }
 
 void AudioTrack::setMasterBPM(double newMasterBPM)
 {
     juce::ScopedLock sl(lock);
     masterBPM = newMasterBPM;
-    autoSyncToMaster();
 }
 
 void AudioTrack::processBlock(juce::AudioBuffer<float>& buffer, int startSample, int numSamples)
@@ -317,13 +336,6 @@ void AudioTrack::processBlock(juce::AudioBuffer<float>& buffer, int startSample,
         return;
     }
     
-    if (!stretcher)
-    {
-        updateStretcher();
-        if (!stretcher)
-            return;
-    }
-    
     const int outputChannels = buffer.getNumChannels();
     const int inputChannels = audioBuffer.getNumChannels();
     const int totalSamples = audioBuffer.getNumSamples();
@@ -331,59 +343,154 @@ void AudioTrack::processBlock(juce::AudioBuffer<float>& buffer, int startSample,
     if (outputChannels <= 0 || inputChannels <= 0 || totalSamples <= 0)
         return;
     
-    // Ensure we don't write beyond buffer bounds
     if (startSample + numSamples > buffer.getNumSamples())
         return;
     
-    // Calculate the current sample position in the original audio
-    const double samplesPerSecond = sampleRate;
-    int currentSample = static_cast<int>(currentPosition * samplesPerSecond);
+    if (std::abs(stretchRatio - 1.0) < 0.02)
+    {
+        processDirectPlayback(buffer, startSample, numSamples);
+    }
+    else
+    {
+        processWithSoundTouch(buffer, startSample, numSamples);
+    }
+}
+
+void AudioTrack::processDirectPlayback(juce::AudioBuffer<float>& buffer, int startSample, int numSamples)
+{
+    const int outputChannels = buffer.getNumChannels();
+    const int inputChannels = audioBuffer.getNumChannels();
+    const int totalSamples = audioBuffer.getNumSamples();
+    const int channelsToProcess = juce::jmin(outputChannels, inputChannels);
     
-    // Handle looping
+    int currentSample = static_cast<int>(currentPosition * sampleRate);
+    
     if (looping && currentSample >= totalSamples)
     {
         currentSample = currentSample % totalSamples;
-        currentPosition = currentSample / samplesPerSecond;
+        currentPosition = currentSample / sampleRate;
     }
     else if (currentSample >= totalSamples)
     {
-        return; // Past end and not looping
+        return;
     }
     
-    // Calculate how many samples we can read from current position
     int samplesToRead = juce::jmin(numSamples, totalSamples - currentSample);
     if (samplesToRead <= 0)
         return;
     
-    // Create temporary buffer for audio processing
-    juce::AudioBuffer<float> tempBuffer(inputChannels, samplesToRead);
-    
-    // Copy audio data safely
-    for (int ch = 0; ch < inputChannels; ++ch)
-    {
-        tempBuffer.copyFrom(ch, 0, audioBuffer, ch, currentSample, samplesToRead);
-    }
-    
-    // Simple playback without stretcher for now to avoid crashes
-    // Mix directly to output buffer
-    const int channelsToProcess = juce::jmin(outputChannels, inputChannels);
-    
     for (int ch = 0; ch < channelsToProcess; ++ch)
     {
-        // Add to existing buffer content (mixing)
-        buffer.addFrom(ch, startSample, tempBuffer, ch, 0, samplesToRead, volume);
+        buffer.addFrom(ch, startSample, audioBuffer, ch, currentSample, samplesToRead, volume);
     }
     
-    // Handle mono to stereo conversion
     if (inputChannels == 1 && outputChannels >= 2)
     {
-        buffer.addFrom(1, startSample, tempBuffer, 0, 0, samplesToRead, volume);
+        buffer.addFrom(1, startSample, audioBuffer, 0, currentSample, samplesToRead, volume);
     }
     
-    // Update position
     currentPosition += (double)samplesToRead / sampleRate;
     
-    // Handle looping wrap-around
+    if (looping && currentPosition * sampleRate >= totalSamples)
+    {
+        currentPosition = 0.0;
+    }
+}
+
+void AudioTrack::processWithSoundTouch(juce::AudioBuffer<float>& buffer, int startSample, int numSamples)
+{
+    const int outputChannels = buffer.getNumChannels();
+    const int inputChannels = audioBuffer.getNumChannels();
+    const int totalSamples = audioBuffer.getNumSamples();
+    const int channelsToProcess = juce::jmin(outputChannels, inputChannels);
+    
+    if (!soundTouch)
+        return;
+    
+    soundTouch->setTempo(stretchRatio);
+    
+    int currentSample = static_cast<int>(currentPosition * sampleRate);
+    
+    if (looping && currentSample >= totalSamples)
+    {
+        currentSample = currentSample % totalSamples;
+        currentPosition = currentSample / sampleRate;
+        soundTouch->clear();
+    }
+    else if (currentSample >= totalSamples)
+    {
+        return;
+    }
+    
+    int samplesToRead = juce::jmin(numSamples * 2, totalSamples - currentSample);
+    if (samplesToRead <= 0)
+        return;
+    
+    juce::AudioBuffer<float> inputBuffer(inputChannels, samplesToRead);
+    for (int ch = 0; ch < inputChannels; ++ch)
+    {
+        inputBuffer.copyFrom(ch, 0, audioBuffer, ch, currentSample, samplesToRead);
+    }
+    
+    if (inputChannels == 1)
+    {
+        const float* input = inputBuffer.getReadPointer(0);
+        soundTouch->putSamples(input, samplesToRead);
+    }
+    else
+    {
+        juce::AudioBuffer<float> interleavedInput(1, samplesToRead * inputChannels);
+        float* interleaved = interleavedInput.getWritePointer(0);
+        
+        for (int sample = 0; sample < samplesToRead; ++sample)
+        {
+            for (int ch = 0; ch < inputChannels; ++ch)
+            {
+                interleaved[sample * inputChannels + ch] = inputBuffer.getSample(ch, sample);
+            }
+        }
+        
+        soundTouch->putSamples(interleaved, samplesToRead);
+    }
+    
+    uint32_t receivedSamples = soundTouch->receiveSamples(stretchedBuffer.getWritePointer(0), numSamples);
+    
+    if (receivedSamples > 0)
+    {
+        if (stretchedBuffer.getNumChannels() != inputChannels ||
+            stretchedBuffer.getNumSamples() < (int)receivedSamples)
+        {
+            stretchedBuffer.setSize(inputChannels, receivedSamples, false, false, true);
+        }
+        
+        if (inputChannels == 1)
+        {
+            for (int i = 0; i < (int)receivedSamples && i < numSamples; ++i)
+            {
+                float sample = stretchedBuffer.getSample(0, i);
+                buffer.addSample(0, startSample + i, sample * volume);
+                
+                if (outputChannels >= 2)
+                {
+                    buffer.addSample(1, startSample + i, sample * volume);
+                }
+            }
+        }
+        else
+        {
+            for (int i = 0; i < (int)receivedSamples && i < numSamples; ++i)
+            {
+                for (int ch = 0; ch < channelsToProcess; ++ch)
+                {
+                    float sample = stretchedBuffer.getSample(0, i * inputChannels + ch);
+                    buffer.addSample(ch, startSample + i, sample * volume);
+                }
+            }
+        }
+    }
+    
+    currentPosition += (double)samplesToRead / sampleRate;
+    
     if (looping && currentPosition * sampleRate >= totalSamples)
     {
         currentPosition = 0.0;
@@ -397,34 +504,11 @@ double AudioTrack::getDurationInSeconds() const
     return 0.0;
 }
 
-void AudioTrack::updateStretcher()
-{
-    if (audioBuffer.getNumSamples() > 0)
-    {
-        const int channels = audioBuffer.getNumChannels();
-        
-        RubberBand::RubberBandStretcher::Options options =
-            RubberBand::RubberBandStretcher::OptionProcessRealTime |
-            RubberBand::RubberBandStretcher::OptionStretchElastic |
-            RubberBand::RubberBandStretcher::OptionTransientsCrisp |
-            RubberBand::RubberBandStretcher::OptionPhaseIndependent;
-        
-        stretcher.reset(new RubberBand::RubberBandStretcher(
-            static_cast<size_t>(sampleRate),
-            static_cast<size_t>(channels),
-            options,
-            stretchRatio,
-            1.0
-        ));
-    }
-}
-
 double AudioTrack::detectBPM()
 {
     if (!isLoaded() || audioBuffer.getNumSamples() == 0)
         return 0.0;
     
-    // Simple BPM detection using onset detection
     const int hopSize = 512;
     const int fftSize = 1024;
     const float* audioData = audioBuffer.getReadPointer(0);
@@ -433,30 +517,25 @@ double AudioTrack::detectBPM()
     std::vector<float> onsetStrengths;
     std::vector<float> prevSpectrum(fftSize / 2, 0.0f);
     
-    // Analyze audio in chunks
     for (int i = 0; i < numSamples - fftSize; i += hopSize)
     {
         std::vector<float> window(fftSize);
         
-        // Copy windowed audio
         for (int j = 0; j < fftSize; ++j)
         {
             if (i + j < numSamples)
             {
-                // Apply Hanning window
                 float hannWindow = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * j / (fftSize - 1)));
                 window[j] = audioData[i + j] * hannWindow;
             }
         }
         
-        // Simple spectral flux calculation
         std::vector<float> spectrum(fftSize / 2, 0.0f);
         for (int j = 0; j < fftSize / 2; ++j)
         {
-            spectrum[j] = window[j] * window[j]; // Simple power spectrum approximation
+            spectrum[j] = window[j] * window[j];
         }
         
-        // Calculate onset strength (spectral flux)
         float onsetStrength = 0.0f;
         for (int j = 0; j < fftSize / 2; ++j)
         {
@@ -469,7 +548,6 @@ double AudioTrack::detectBPM()
         prevSpectrum = spectrum;
     }
     
-    // Find peaks in onset strength
     std::vector<int> peakIndices;
     const float threshold = *std::max_element(onsetStrengths.begin(), onsetStrengths.end()) * 0.3f;
     
@@ -483,29 +561,25 @@ double AudioTrack::detectBPM()
         }
     }
     
-    // Calculate intervals between peaks
     if (peakIndices.size() < 4)
-        return 120.0; // Default BPM if detection fails
+        return 120.0;
     
     std::vector<double> intervals;
     for (int i = 1; i < peakIndices.size(); ++i)
     {
         double interval = (peakIndices[i] - peakIndices[i-1]) * hopSize / sampleRate;
-        if (interval > 0.2 && interval < 2.0) // Reasonable beat intervals
+        if (interval > 0.2 && interval < 2.0)
             intervals.push_back(interval);
     }
     
     if (intervals.empty())
         return 120.0;
     
-    // Find most common interval
     std::sort(intervals.begin(), intervals.end());
     double medianInterval = intervals[intervals.size() / 2];
     
-    // Convert to BPM
     double bpm = 60.0 / medianInterval;
     
-    // Snap to reasonable BPM range
     if (bpm < 60.0) bpm *= 2.0;
     if (bpm > 200.0) bpm /= 2.0;
     if (bpm < 60.0) bpm = 120.0;
@@ -518,8 +592,8 @@ void AudioTrack::autoSyncToMaster()
 {
     if (detectedBPM > 0.0 && masterBPM > 0.0)
     {
-        double newStretchRatio = detectedBPM / masterBPM;
-        setStretchRatio(newStretchRatio);
+        double syncRatio = detectedBPM / masterBPM;
+        setStretchRatio(syncRatio);
     }
 }
 
@@ -542,7 +616,6 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
       stretchLabel("stretchLabel", "Stretch: 1.00x"),
       volumeLabel("volumeLabel", "Vol")
 {
-    // Create waveform display
     waveformDisplay = std::make_unique<WaveformComponent>();
     addAndMakeVisible(waveformDisplay.get());
     
@@ -567,11 +640,10 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
     volumeSlider.setValue(1.0);
     volumeSlider.onValueChange = [this] { volumeSliderChanged(); };
     
-    stretchSlider.setRange(0.5, 2.0, 0.01);
+    stretchSlider.setRange(0.25, 4.0, 0.01);
     stretchSlider.setValue(1.0);
     stretchSlider.onValueChange = [this] { stretchSliderChanged(); };
     
-    // Setup waveform callback
     waveformDisplay->onPositionChanged = [this](double position) { onWaveformPositionChanged(position); };
     
     muteButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
@@ -594,7 +666,6 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
 
 TrackComponent::~TrackComponent()
 {
-    // Clear all button callbacks to prevent dangling references
     loadButton.onClick = nullptr;
     muteButton.onClick = nullptr;
     soloButton.onClick = nullptr;
@@ -607,7 +678,6 @@ TrackComponent::~TrackComponent()
         waveformDisplay->onPositionChanged = nullptr;
     }
     
-    // Clear audio track reference
     audioTrack = nullptr;
 }
 
@@ -617,7 +687,6 @@ void TrackComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colours::white.withAlpha(0.1f));
     g.drawRect(getLocalBounds());
     
-    // Draw level indicator if audio is loaded
     if (audioTrack && audioTrack->isLoaded())
     {
         g.setColour(juce::Colours::green.withAlpha(0.3f));
@@ -638,7 +707,6 @@ void TrackComponent::resized()
     
     area.removeFromTop(5);
     
-    // Waveform display - main visual area
     waveformDisplay->setBounds(area.removeFromTop(80));
     
     area.removeFromTop(5);
@@ -677,8 +745,8 @@ void TrackComponent::updateTrackInfo()
         else
             bpmLabel.setText("BPM: --", juce::dontSendNotification);
             
-        // Update waveform position
         waveformDisplay->setPlayPosition(audioTrack->getCurrentPosition());
+        stretchSlider.setValue(audioTrack->getStretchRatio(), juce::dontSendNotification);
     }
     else
     {
@@ -695,7 +763,7 @@ void TrackComponent::updateTrackInfo()
         
         waveformDisplay->setLooping(audioTrack->isLooping());
         
-        stretchLabel.setText("Stretch: " + juce::String(stretchSlider.getValue(), 2) + "x",
+        stretchLabel.setText("Stretch: " + juce::String(audioTrack->getStretchRatio(), 2) + "x",
                            juce::dontSendNotification);
     }
 }
@@ -705,7 +773,7 @@ void TrackComponent::updateWaveform()
     if (audioTrack && audioTrack->isLoaded())
     {
         waveformDisplay->setWaveformData(audioTrack->getWaveformPeaks(),
-                                       44100.0, // Sample rate
+                                       44100.0,
                                        audioTrack->getDurationInSeconds() * 44100.0);
         waveformDisplay->setDuration(audioTrack->getDurationInSeconds());
     }
@@ -713,7 +781,6 @@ void TrackComponent::updateWaveform()
 
 void TrackComponent::loadButtonClicked()
 {
-    // Use a safer FileChooser approach without raw pointers
     auto chooser = std::make_shared<juce::FileChooser>("Select an audio file...",
                                                        juce::File(),
                                                        "*.wav;*.aiff;*.mp3;*.flac;*.ogg");
@@ -845,14 +912,12 @@ TransportComponent::TransportComponent()
 
 TransportComponent::~TransportComponent()
 {
-    // Clear all callbacks to prevent dangling references
     onPlay = nullptr;
     onStop = nullptr;
     onRecord = nullptr;
     onTempoChanged = nullptr;
     onAutoSync = nullptr;
     
-    // Clear button callbacks
     playButton.onClick = nullptr;
     stopButton.onClick = nullptr;
     recordButton.onClick = nullptr;
@@ -866,7 +931,6 @@ void TransportComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colours::white.withAlpha(0.1f));
     g.drawRect(getLocalBounds());
     
-    // Draw sync indicator
     if (autoSyncEnabled)
     {
         g.setColour(juce::Colours::green.withAlpha(0.3f));
@@ -978,6 +1042,7 @@ void TransportComponent::tempoSliderChanged()
 
 MainComponent::MainComponent()
     : masterTempo(120.0),
+      previousMasterTempo(120.0),
       currentPlayPosition(0.0),
       isPlaying(false),
       isRecording(false),
@@ -990,18 +1055,14 @@ MainComponent::MainComponent()
     setSize(900, 800);
     setAudioChannels(0, 2);
     
-    startTimer(50); // Faster timer for smooth waveform updates
+    startTimer(50);
 }
 
 MainComponent::~MainComponent()
 {
-    // Stop timer first to prevent callbacks during destruction
     stopTimer();
-    
-    // Shutdown audio system
     shutdownAudio();
     
-    // Clear transport callbacks to avoid dangling references
     if (transportComponent)
     {
         transportComponent->onPlay = nullptr;
@@ -1011,7 +1072,6 @@ MainComponent::~MainComponent()
         transportComponent->onAutoSync = nullptr;
     }
     
-    // Clear all track references
     for (auto& track : audioTracks)
     {
         if (track)
@@ -1020,7 +1080,6 @@ MainComponent::~MainComponent()
         }
     }
     
-    // Clear all component references
     for (auto& trackComp : trackComponents)
     {
         if (trackComp)
@@ -1029,7 +1088,6 @@ MainComponent::~MainComponent()
         }
     }
     
-    // Clear transport component
     transportComponent.reset();
 }
 
@@ -1049,7 +1107,6 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     
     const int numSamples = bufferToFill.numSamples;
     
-    // Check for solo tracks
     bool hasSolo = false;
     for (auto& track : audioTracks)
     {
@@ -1060,12 +1117,10 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
         }
     }
     
-    // Mix all tracks
     for (auto& track : audioTracks)
     {
         if (track && track->isLoaded())
         {
-            // Skip muted tracks, or non-solo tracks when solo is active
             if (track->isMuted() || (hasSolo && !track->isSolo()))
                 continue;
                 
@@ -1073,8 +1128,7 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
         }
     }
     
-    // Update play position
-    const double sampleRate = 44100.0; // Should get from actual sample rate
+    const double sampleRate = 44100.0;
     currentPlayPosition += numSamples / sampleRate;
 }
 
@@ -1086,23 +1140,22 @@ void MainComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xff0f0f0f));
     
-    // Draw title
     g.setColour(juce::Colours::white);
     g.setFont(juce::Font(16.0f, juce::Font::bold));
-    g.drawText("STRETCHER - Multitrack Audio Looper with Waveforms", 10, 5, 400, 20, juce::Justification::left);
+    g.drawText("STRETCHER - Multitrack Audio Looper (SoundTouch Pitch-Preserving)", 10, 5, 650, 20, juce::Justification::left);
 }
 
 void MainComponent::resized()
 {
     juce::Rectangle<int> area = getLocalBounds();
     
-    area.removeFromTop(25); // Title area
+    area.removeFromTop(25);
     
     transportComponent->setBounds(area.removeFromTop(80));
     
     tracksViewport.setBounds(area);
     
-    int trackHeight = 220; // Increased height for waveform display
+    int trackHeight = 220;
     tracksContainer.setSize(getWidth(), maxTracks * trackHeight);
     
     for (int i = 0; i < maxTracks; ++i)
@@ -1123,16 +1176,6 @@ void MainComponent::timerCallback()
         if (trackComp)
         {
             trackComp->updateTrackInfo();
-        }
-    }
-    
-    // Auto-sync tempo if enabled
-    if (autoSyncEnabled && !isPlaying)
-    {
-        double avgBPM = findAverageBPM();
-        if (avgBPM > 0.0 && std::abs(avgBPM - masterTempo) > 1.0)
-        {
-            setTempo(avgBPM);
         }
     }
 }
@@ -1198,9 +1241,21 @@ void MainComponent::record()
 
 void MainComponent::setTempo(double bpm)
 {
+    juce::ScopedLock sl(audioLock);
+    
+    double scaleFactor = bpm / previousMasterTempo;
+    
+    for (auto& track : audioTracks)
+    {
+        if (track && track->isLoaded())
+        {
+            track->scaleStretchRatio(scaleFactor);
+        }
+    }
+    
+    previousMasterTempo = masterTempo;
     masterTempo = bpm;
     
-    // Update all tracks with new master BPM
     for (auto& track : audioTracks)
     {
         if (track)
@@ -1221,7 +1276,6 @@ void MainComponent::autoSyncAllTracks()
     
     if (autoSyncEnabled)
     {
-        // Find average BPM and sync all tracks
         double avgBPM = findAverageBPM();
         if (avgBPM > 0.0)
         {
@@ -1280,11 +1334,21 @@ double MainComponent::findAverageBPM()
     return sum / bpms.size();
 }
 
+void MainComponent::syncNewTrackToMaster(AudioTrack* track)
+{
+    if (track && track->isLoaded())
+    {
+        track->setMasterBPM(masterTempo);
+        track->autoSyncToMaster();
+    }
+}
+
 void MainComponent::setupTracks()
 {
     for (int i = 0; i < maxTracks; ++i)
     {
         audioTracks[i] = std::make_unique<AudioTrack>();
+        audioTracks[i]->setMasterBPM(masterTempo);
         trackComponents[i] = std::make_unique<TrackComponent>(audioTracks[i].get(), i);
         
         tracksContainer.addAndMakeVisible(trackComponents[i].get());

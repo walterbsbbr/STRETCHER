@@ -434,8 +434,8 @@
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/../../JuceLibraryCode",
 					"/Applications/JUCE/modules",
-					"/Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0",
-					"/Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0/rubberband",
+					"$(SRCROOT)/opt/homebrew/include",
+					"/opt/homebrew/include",
 					"$(inherited)",
 				);
 				INFOPLIST_FILE = Info-App.plist;
@@ -443,11 +443,11 @@
 				INSTALL_PATH = "$(HOME)/Applications";
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"/Volumes/STORAGE/AUDIO-MIDI DEV/STRETCHER/STRETCHER\"",
+					"\"/opt/homebrew/lib\"",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 10.13;
-				MTL_HEADER_SEARCH_PATHS = "$(SRCROOT)/../../JuceLibraryCode /Applications/JUCE/modules /Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0 /Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0/rubberband";
-				OTHER_LDFLAGS = "-lrubberband -framework Accelerate -framework CoreFoundation -framework CoreAudio -framework AudioUnit -framework AudioToolbox";
+				MTL_HEADER_SEARCH_PATHS = "$(SRCROOT)/../../JuceLibraryCode /Applications/JUCE/modules $(SRCROOT)/opt/homebrew/include /opt/homebrew/include";
+				OTHER_LDFLAGS = "-lsoundtouch -framework Accelerate -framework CoreFoundation -framework CoreAudio -framework AudioUnit -framework AudioToolbox";
 				PRODUCT_BUNDLE_IDENTIFIER = com.yourcompany.STRETCHER;
 				PRODUCT_NAME = "STRETCHER";
 				USE_HEADERMAP = NO;
@@ -501,8 +501,8 @@
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/../../JuceLibraryCode",
 					"/Applications/JUCE/modules",
-					"/Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0",
-					"/Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0/rubberband",
+					"/opt/homebrew/include",
+					"/opt/homebrew/include",
 					"$(inherited)",
 				);
 				INFOPLIST_FILE = Info-App.plist;
@@ -510,12 +510,12 @@
 				INSTALL_PATH = "$(HOME)/Applications";
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"/Volumes/STORAGE/AUDIO-MIDI DEV/STRETCHER/STRETCHER\"",
+					"\"/opt/homebrew/lib\"",
 				);
 				LLVM_LTO = YES;
 				MACOSX_DEPLOYMENT_TARGET = 10.13;
-				MTL_HEADER_SEARCH_PATHS = "$(SRCROOT)/../../JuceLibraryCode /Applications/JUCE/modules /Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0 /Volumes/STORAGE/DEVELOPMENT/Bibliotecas/rubberband-4.0.0/rubberband";
-				OTHER_LDFLAGS = "-lrubberband -framework Accelerate -framework CoreFoundation -framework CoreAudio -framework AudioUnit -framework AudioToolbox";
+				MTL_HEADER_SEARCH_PATHS = "$(SRCROOT)/../../JuceLibraryCode /Applications/JUCE/modules /opt/homebrew/include /opt/homebrew/include";
+				OTHER_LDFLAGS = "-lsoundtouch -framework Accelerate -framework CoreFoundation -framework CoreAudio -framework AudioUnit -framework AudioToolbox";
 				PRODUCT_BUNDLE_IDENTIFIER = com.yourcompany.STRETCHER;
 				PRODUCT_NAME = "STRETCHER";
 				USE_HEADERMAP = NO;

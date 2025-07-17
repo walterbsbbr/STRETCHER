@@ -1,7 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
-#include "rubberband/RubberBandStretcher.h"
+#include <soundtouch/SoundTouch.h>
 
 class WaveformComponent : public juce::Component
 {
@@ -41,14 +41,17 @@ public:
     
     void loadAudioFile(const juce::File& file);
     void setStretchRatio(double ratio);
+    void scaleStretchRatio(double scaleFactor);
     void setPosition(double positionInSeconds);
     void reset();
+    void setMasterBPM(double masterBPM);
     
     void processBlock(juce::AudioBuffer<float>& buffer, int startSample, int numSamples);
     
     bool isLoaded() const { return audioBuffer.getNumSamples() > 0; }
     double getDurationInSeconds() const;
     double getCurrentPosition() const { return currentPosition; }
+    double getStretchRatio() const { return stretchRatio; }
     juce::String getFileName() const { return fileName; }
     double getDetectedBPM() const { return detectedBPM; }
     const std::vector<float>& getWaveformPeaks() const { return waveformPeaks; }
@@ -57,7 +60,7 @@ public:
     void setSolo(bool shouldBeSolo) { solo = shouldBeSolo; }
     void setVolume(float newVolume) { volume = newVolume; }
     void setLooping(bool shouldLoop) { looping = shouldLoop; }
-    void setMasterBPM(double masterBPM);
+    void autoSyncToMaster();
     
     bool isMuted() const { return muted; }
     bool isSolo() const { return solo; }
@@ -66,9 +69,10 @@ public:
 
 private:
     juce::AudioBuffer<float> audioBuffer;
-    std::unique_ptr<RubberBand::RubberBandStretcher> stretcher;
+    std::unique_ptr<soundtouch::SoundTouch> soundTouch;
     juce::AudioFormatManager formatManager;
     std::vector<float> waveformPeaks;
+    juce::AudioBuffer<float> stretchedBuffer;
     
     double sampleRate;
     double currentPosition;
@@ -84,10 +88,11 @@ private:
     
     juce::CriticalSection lock;
     
-    void updateStretcher();
     double detectBPM();
-    void autoSyncToMaster();
     void generateWaveformPeaks();
+    void processDirectPlayback(juce::AudioBuffer<float>& buffer, int startSample, int numSamples);
+    void processWithSoundTouch(juce::AudioBuffer<float>& buffer, int startSample, int numSamples);
+    void initializeSoundTouch();
 };
 
 class TrackComponent : public juce::Component
@@ -202,6 +207,7 @@ private:
     juce::Component tracksContainer;
     
     double masterTempo;
+    double previousMasterTempo;
     double currentPlayPosition;
     bool isPlaying;
     bool isRecording;
@@ -217,6 +223,7 @@ private:
     void updatePlayPosition();
     void setTrackPosition(int trackIndex, double position);
     double findAverageBPM();
+    void syncNewTrackToMaster(AudioTrack* track);
     
     void setupTracks();
     void setupTransport();
