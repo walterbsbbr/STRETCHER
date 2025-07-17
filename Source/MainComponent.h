@@ -3,6 +3,36 @@
 #include <JuceHeader.h>
 #include "rubberband/RubberBandStretcher.h"
 
+class WaveformComponent : public juce::Component
+{
+public:
+    WaveformComponent();
+    ~WaveformComponent() override;
+    
+    void paint(juce::Graphics& g) override;
+    void mouseDown(const juce::MouseEvent& event) override;
+    void mouseDrag(const juce::MouseEvent& event) override;
+    
+    void setWaveformData(const std::vector<float>& peaks, double sampleRate, int totalSamples);
+    void setPlayPosition(double positionInSeconds);
+    void setDuration(double durationInSeconds);
+    void setLooping(bool shouldLoop);
+    
+    std::function<void(double)> onPositionChanged;
+
+private:
+    std::vector<float> waveformPeaks;
+    double currentPosition;
+    double totalDuration;
+    double sampleRate;
+    int totalSamples;
+    bool isLooping;
+    
+    void updatePositionFromMouse(const juce::MouseEvent& event);
+    
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
+};
+
 class AudioTrack
 {
 public:
@@ -18,33 +48,46 @@ public:
     
     bool isLoaded() const { return audioBuffer.getNumSamples() > 0; }
     double getDurationInSeconds() const;
+    double getCurrentPosition() const { return currentPosition; }
     juce::String getFileName() const { return fileName; }
+    double getDetectedBPM() const { return detectedBPM; }
+    const std::vector<float>& getWaveformPeaks() const { return waveformPeaks; }
     
     void setMuted(bool shouldBeMuted) { muted = shouldBeMuted; }
     void setSolo(bool shouldBeSolo) { solo = shouldBeSolo; }
     void setVolume(float newVolume) { volume = newVolume; }
+    void setLooping(bool shouldLoop) { looping = shouldLoop; }
+    void setMasterBPM(double masterBPM);
     
     bool isMuted() const { return muted; }
     bool isSolo() const { return solo; }
     float getVolume() const { return volume; }
+    bool isLooping() const { return looping; }
 
 private:
     juce::AudioBuffer<float> audioBuffer;
     std::unique_ptr<RubberBand::RubberBandStretcher> stretcher;
     juce::AudioFormatManager formatManager;
+    std::vector<float> waveformPeaks;
     
     double sampleRate;
     double currentPosition;
     double stretchRatio;
+    double detectedBPM;
+    double masterBPM;
     juce::String fileName;
     
     bool muted;
     bool solo;
+    bool looping;
     float volume;
     
     juce::CriticalSection lock;
     
     void updateStretcher();
+    double detectBPM();
+    void autoSyncToMaster();
+    void generateWaveformPeaks();
 };
 
 class TrackComponent : public juce::Component
@@ -57,24 +100,32 @@ public:
     void resized() override;
     
     void updateTrackInfo();
+    void updateWaveform();
 
 private:
     AudioTrack* audioTrack;
     int trackNum;
     
+    std::unique_ptr<WaveformComponent> waveformDisplay;
     juce::TextButton loadButton;
     juce::TextButton muteButton;
     juce::TextButton soloButton;
+    juce::TextButton loopButton;
     juce::Slider volumeSlider;
     juce::Slider stretchSlider;
     juce::Label trackLabel;
     juce::Label fileLabel;
+    juce::Label bpmLabel;
+    juce::Label stretchLabel;
+    juce::Label volumeLabel;
     
     void loadButtonClicked();
     void muteButtonClicked();
     void soloButtonClicked();
+    void loopButtonClicked();
     void volumeSliderChanged();
     void stretchSliderChanged();
+    void onWaveformPositionChanged(double position);
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackComponent)
 };
@@ -92,6 +143,7 @@ public:
     std::function<void()> onStop;
     std::function<void()> onRecord;
     std::function<void(double)> onTempoChanged;
+    std::function<void()> onAutoSync;
     
     void setPlaying(bool isPlaying);
     void setRecording(bool isRecording);
@@ -102,18 +154,22 @@ private:
     juce::TextButton playButton;
     juce::TextButton stopButton;
     juce::TextButton recordButton;
+    juce::TextButton autoSyncButton;
     juce::Slider tempoSlider;
     juce::Label tempoLabel;
     juce::Label positionLabel;
+    juce::Label masterBpmLabel;
     
     bool playing;
     bool recording;
+    bool autoSyncEnabled;
     double currentTempo;
     double currentPosition;
     
     void playButtonClicked();
     void stopButtonClicked();
     void recordButtonClicked();
+    void autoSyncButtonClicked();
     void tempoSliderChanged();
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportComponent)
@@ -149,6 +205,7 @@ private:
     double currentPlayPosition;
     bool isPlaying;
     bool isRecording;
+    bool autoSyncEnabled;
     
     juce::CriticalSection audioLock;
     
@@ -156,7 +213,10 @@ private:
     void stop();
     void record();
     void setTempo(double bpm);
+    void autoSyncAllTracks();
     void updatePlayPosition();
+    void setTrackPosition(int trackIndex, double position);
+    double findAverageBPM();
     
     void setupTracks();
     void setupTransport();
