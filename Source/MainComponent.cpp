@@ -9,7 +9,10 @@ WaveformComponent::WaveformComponent()
       totalDuration(0.0),
       sampleRate(44100.0),
       totalSamples(0),
-      isLooping(true)
+      isLooping(true),
+      detectedBPM(120.0),
+      waveformColour(juce::Colour(0xff0080ff)),
+      quantizeDivisions(8)
 {
 }
 
@@ -30,6 +33,9 @@ void WaveformComponent::paint(juce::Graphics& g)
     
     area = area.reduced(2);
     
+    // Draw grid first (behind waveform)
+    drawGrid(g, area);
+    
     if (waveformPeaks.empty())
     {
         // Draw placeholder text
@@ -39,8 +45,8 @@ void WaveformComponent::paint(juce::Graphics& g)
         return;
     }
     
-    // Draw waveform
-    g.setColour(juce::Colour(0xff0080ff));
+    // Draw waveform with track-specific color
+    g.setColour(waveformColour);
     
     const int width = area.getWidth();
     const int height = area.getHeight();
@@ -91,6 +97,9 @@ void WaveformComponent::paint(juce::Graphics& g)
         g.fillPath(waveformPath);
     }
     
+    // Draw beat lines on top of waveform
+    drawBeatLines(g, area);
+    
     // Draw playback position
     if (totalDuration > 0.0)
     {
@@ -109,6 +118,71 @@ void WaveformComponent::paint(juce::Graphics& g)
     {
         g.setColour(juce::Colours::green.withAlpha(0.3f));
         g.fillRect(area.getX(), area.getBottom() - 3, area.getWidth(), 3);
+    }
+}
+
+void WaveformComponent::drawGrid(juce::Graphics& g, const juce::Rectangle<int>& area)
+{
+    // Draw amplitude grid lines (horizontal)
+    g.setColour(juce::Colours::white.withAlpha(0.1f));
+    
+    const int centerY = area.getCentreY();
+    const int quarterHeight = area.getHeight() / 4;
+    
+    // Center line
+    g.drawHorizontalLine(centerY, area.getX(), area.getRight());
+    
+    // Quarter lines
+    g.drawHorizontalLine(centerY - quarterHeight, area.getX(), area.getRight());
+    g.drawHorizontalLine(centerY + quarterHeight, area.getX(), area.getRight());
+    
+    // Half lines
+    g.drawHorizontalLine(centerY - quarterHeight / 2, area.getX(), area.getRight());
+    g.drawHorizontalLine(centerY + quarterHeight / 2, area.getX(), area.getRight());
+}
+
+void WaveformComponent::drawBeatLines(juce::Graphics& g, const juce::Rectangle<int>& area)
+{
+    if (totalDuration <= 0.0 || quantizeDivisions <= 0)
+        return;
+    
+    // Calculate exact interval by dividing total duration by chosen divisions
+    double divisionInterval = totalDuration / (double)quantizeDivisions;
+    
+    g.setColour(juce::Colours::white.withAlpha(0.15f));
+    
+    const int width = area.getWidth();
+    
+    // Draw vertical lines at each division (excluding start and end)
+    for (int i = 1; i < quantizeDivisions; ++i)
+    {
+        double divisionTime = i * divisionInterval;
+        double normalizedPosition = divisionTime / totalDuration;
+        int divisionX = area.getX() + (int)(normalizedPosition * width);
+        
+        if (divisionX >= area.getX() && divisionX < area.getRight())
+        {
+            // Draw stronger line for every 4th division (downbeats)
+            if (i % 4 == 0)
+            {
+                g.setColour(juce::Colours::white.withAlpha(0.25f));
+                g.drawVerticalLine(divisionX, area.getY(), area.getBottom());
+                g.setColour(juce::Colours::white.withAlpha(0.15f));
+            }
+            else
+            {
+                g.drawVerticalLine(divisionX, area.getY(), area.getBottom());
+            }
+        }
+    }
+}
+
+void WaveformComponent::setQuantizeValue(int quantizeValue)
+{
+    if (quantizeDivisions != quantizeValue)
+    {
+        quantizeDivisions = quantizeValue;
+        repaint();
     }
 }
 
@@ -163,6 +237,7 @@ void WaveformComponent::setPlayPosition(double positionInSeconds)
 void WaveformComponent::setDuration(double durationInSeconds)
 {
     totalDuration = durationInSeconds;
+    repaint();
 }
 
 void WaveformComponent::setLooping(bool shouldLoop)
@@ -170,6 +245,24 @@ void WaveformComponent::setLooping(bool shouldLoop)
     if (isLooping != shouldLoop)
     {
         isLooping = shouldLoop;
+        repaint();
+    }
+}
+
+void WaveformComponent::setDetectedBPM(double bpm)
+{
+    if (detectedBPM != bpm)
+    {
+        detectedBPM = bpm;
+        repaint();
+    }
+}
+
+void WaveformComponent::setWaveformColour(const juce::Colour& colour)
+{
+    if (waveformColour != colour)
+    {
+        waveformColour = colour;
         repaint();
     }
 }
@@ -608,21 +701,28 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
       muteButton("M"),
       soloButton("S"),
       loopButton("Loop"),
+      quantizeButton("Q:8"),
       volumeSlider(juce::Slider::LinearHorizontal, juce::Slider::NoTextBox),
       stretchSlider(juce::Slider::LinearHorizontal, juce::Slider::NoTextBox),
       trackLabel("trackLabel", "Track " + juce::String(trackNumber + 1)),
       fileLabel("fileLabel", "No file loaded"),
       bpmLabel("bpmLabel", "BPM: --"),
       stretchLabel("stretchLabel", "Stretch: 1.00x"),
-      volumeLabel("volumeLabel", "Vol")
+      volumeLabel("volumeLabel", "Vol"),
+      currentQuantize(8)
 {
     waveformDisplay = std::make_unique<WaveformComponent>();
     addAndMakeVisible(waveformDisplay.get());
+    
+    // Set track-specific color for waveform
+    waveformDisplay->setWaveformColour(getTrackColour(trackNumber));
+    waveformDisplay->setQuantizeValue(currentQuantize);
     
     addAndMakeVisible(loadButton);
     addAndMakeVisible(muteButton);
     addAndMakeVisible(soloButton);
     addAndMakeVisible(loopButton);
+    addAndMakeVisible(quantizeButton);
     addAndMakeVisible(volumeSlider);
     addAndMakeVisible(stretchSlider);
     addAndMakeVisible(trackLabel);
@@ -635,6 +735,7 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
     muteButton.onClick = [this] { muteButtonClicked(); };
     soloButton.onClick = [this] { soloButtonClicked(); };
     loopButton.onClick = [this] { loopButtonClicked(); };
+    quantizeButton.onClick = [this] { quantizeButtonClicked(); };
     
     volumeSlider.setRange(0.0, 1.0, 0.01);
     volumeSlider.setValue(1.0);
@@ -649,6 +750,7 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
     muteButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
     soloButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
     loopButton.setColour(juce::TextButton::buttonColourId, juce::Colours::green.darker());
+    quantizeButton.setColour(juce::TextButton::buttonColourId, juce::Colours::purple.darker());
     
     trackLabel.setFont(juce::Font(14.0f, juce::Font::bold));
     fileLabel.setFont(juce::Font(12.0f));
@@ -661,6 +763,9 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
     stretchLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
     volumeLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     
+    // Set track label color to match waveform
+    trackLabel.setColour(juce::Label::textColourId, getTrackColour(trackNumber));
+    
     loopButton.setToggleState(true, juce::dontSendNotification);
 }
 
@@ -670,8 +775,10 @@ TrackComponent::~TrackComponent()
     muteButton.onClick = nullptr;
     soloButton.onClick = nullptr;
     loopButton.onClick = nullptr;
+    quantizeButton.onClick = nullptr;
     volumeSlider.onValueChange = nullptr;
     stretchSlider.onValueChange = nullptr;
+    onTrackLoaded = nullptr;
     
     if (waveformDisplay)
     {
@@ -679,6 +786,23 @@ TrackComponent::~TrackComponent()
     }
     
     audioTrack = nullptr;
+}
+
+juce::Colour TrackComponent::getTrackColour(int trackNumber)
+{
+    // 8 distinct colors for 8 tracks
+    static const juce::Colour trackColours[8] = {
+        juce::Colour(0xff0080ff),  // Blue
+        juce::Colour(0xff00ff80),  // Green
+        juce::Colour(0xffff8000),  // Orange
+        juce::Colour(0xffff0080),  // Pink
+        juce::Colour(0xff8000ff),  // Purple
+        juce::Colour(0xff00ffff),  // Cyan
+        juce::Colour(0xffffff00),  // Yellow
+        juce::Colour(0xffff4040)   // Red
+    };
+    
+    return trackColours[trackNumber % 8];
 }
 
 void TrackComponent::paint(juce::Graphics& g)
@@ -689,7 +813,7 @@ void TrackComponent::paint(juce::Graphics& g)
     
     if (audioTrack && audioTrack->isLoaded())
     {
-        g.setColour(juce::Colours::green.withAlpha(0.3f));
+        g.setColour(getTrackColour(trackNum).withAlpha(0.3f));
         g.fillRect(2, 2, getWidth() - 4, 3);
     }
 }
@@ -719,6 +843,8 @@ void TrackComponent::resized()
     soloButton.setBounds(buttonArea.removeFromLeft(25));
     buttonArea.removeFromLeft(3);
     loopButton.setBounds(buttonArea.removeFromLeft(40));
+    buttonArea.removeFromLeft(3);
+    quantizeButton.setBounds(buttonArea.removeFromLeft(35));
     
     area.removeFromTop(8);
     
@@ -741,9 +867,15 @@ void TrackComponent::updateTrackInfo()
         
         double bpm = audioTrack->getDetectedBPM();
         if (bpm > 0.0)
+        {
             bpmLabel.setText("BPM: " + juce::String(bpm, 1), juce::dontSendNotification);
+            // Update waveform with detected BPM for grid display
+            waveformDisplay->setDetectedBPM(bpm);
+        }
         else
+        {
             bpmLabel.setText("BPM: --", juce::dontSendNotification);
+        }
             
         waveformDisplay->setPlayPosition(audioTrack->getCurrentPosition());
         stretchSlider.setValue(audioTrack->getStretchRatio(), juce::dontSendNotification);
@@ -776,6 +908,7 @@ void TrackComponent::updateWaveform()
                                        44100.0,
                                        audioTrack->getDurationInSeconds() * 44100.0);
         waveformDisplay->setDuration(audioTrack->getDurationInSeconds());
+        waveformDisplay->setDetectedBPM(audioTrack->getDetectedBPM());
     }
 }
 
@@ -793,6 +926,15 @@ void TrackComponent::loadButtonClicked()
         if (file.existsAsFile() && audioTrack)
         {
             audioTrack->loadAudioFile(file);
+            
+            // Notify parent about track loaded with detected BPM FIRST
+            // This will set Master BPM and adjust this track appropriately
+            if (onTrackLoaded && audioTrack->getDetectedBPM() > 0.0)
+            {
+                onTrackLoaded(audioTrack->getDetectedBPM());
+            }
+            
+            // THEN update UI
             updateTrackInfo();
             updateWaveform();
         }
@@ -852,6 +994,26 @@ void TrackComponent::stretchSliderChanged()
     }
 }
 
+void TrackComponent::quantizeButtonClicked()
+{
+    // Cycle through quantize values: 4 -> 8 -> 16 -> 32 -> 4
+    switch (currentQuantize)
+    {
+        case 4:  currentQuantize = 8;  break;
+        case 8:  currentQuantize = 16; break;
+        case 16: currentQuantize = 32; break;
+        case 32: currentQuantize = 4;  break;
+        default: currentQuantize = 8;  break;
+    }
+    
+    quantizeButton.setButtonText("Q:" + juce::String(currentQuantize));
+    
+    if (waveformDisplay)
+    {
+        waveformDisplay->setQuantizeValue(currentQuantize);
+    }
+}
+
 void TrackComponent::onWaveformPositionChanged(double position)
 {
     if (audioTrack)
@@ -869,6 +1031,7 @@ TransportComponent::TransportComponent()
       stopButton("Stop"),
       recordButton("Rec"),
       autoSyncButton("Auto Sync"),
+      metronomeButton("Metro"),
       tempoSlider(juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight),
       tempoLabel("tempoLabel", "Master BPM:"),
       positionLabel("positionLabel", "00:00"),
@@ -876,6 +1039,7 @@ TransportComponent::TransportComponent()
       playing(false),
       recording(false),
       autoSyncEnabled(true),
+      metronomeEnabled(false),
       currentTempo(120.0),
       currentPosition(0.0)
 {
@@ -883,6 +1047,7 @@ TransportComponent::TransportComponent()
     addAndMakeVisible(stopButton);
     addAndMakeVisible(recordButton);
     addAndMakeVisible(autoSyncButton);
+    addAndMakeVisible(metronomeButton);
     addAndMakeVisible(tempoSlider);
     addAndMakeVisible(tempoLabel);
     addAndMakeVisible(positionLabel);
@@ -892,6 +1057,7 @@ TransportComponent::TransportComponent()
     stopButton.onClick = [this] { stopButtonClicked(); };
     recordButton.onClick = [this] { recordButtonClicked(); };
     autoSyncButton.onClick = [this] { autoSyncButtonClicked(); };
+    metronomeButton.onClick = [this] { metronomeButtonClicked(); };
     
     tempoSlider.setRange(60.0, 200.0, 1.0);
     tempoSlider.setValue(120.0);
@@ -901,6 +1067,7 @@ TransportComponent::TransportComponent()
     stopButton.setColour(juce::TextButton::buttonColourId, juce::Colours::red.darker());
     recordButton.setColour(juce::TextButton::buttonColourId, juce::Colours::red.darker());
     autoSyncButton.setColour(juce::TextButton::buttonColourId, juce::Colours::blue.darker());
+    metronomeButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
     
     tempoLabel.setFont(juce::Font(14.0f, juce::Font::bold));
     positionLabel.setFont(juce::Font(16.0f, juce::Font::bold));
@@ -917,11 +1084,13 @@ TransportComponent::~TransportComponent()
     onRecord = nullptr;
     onTempoChanged = nullptr;
     onAutoSync = nullptr;
+    onMetronome = nullptr;
     
     playButton.onClick = nullptr;
     stopButton.onClick = nullptr;
     recordButton.onClick = nullptr;
     autoSyncButton.onClick = nullptr;
+    metronomeButton.onClick = nullptr;
     tempoSlider.onValueChange = nullptr;
 }
 
@@ -942,7 +1111,7 @@ void TransportComponent::resized()
 {
     juce::Rectangle<int> area = getLocalBounds().reduced(8);
     
-    juce::Rectangle<int> buttonArea = area.removeFromLeft(280);
+    juce::Rectangle<int> buttonArea = area.removeFromLeft(350);
     playButton.setBounds(buttonArea.removeFromLeft(60));
     buttonArea.removeFromLeft(5);
     stopButton.setBounds(buttonArea.removeFromLeft(60));
@@ -950,6 +1119,8 @@ void TransportComponent::resized()
     recordButton.setBounds(buttonArea.removeFromLeft(60));
     buttonArea.removeFromLeft(5);
     autoSyncButton.setBounds(buttonArea.removeFromLeft(80));
+    buttonArea.removeFromLeft(5);
+    metronomeButton.setBounds(buttonArea.removeFromLeft(60));
     
     area.removeFromLeft(20);
     
@@ -1030,6 +1201,25 @@ void TransportComponent::autoSyncButtonClicked()
     repaint();
 }
 
+void TransportComponent::metronomeButtonClicked()
+{
+    metronomeEnabled = !metronomeEnabled;
+    metronomeButton.setToggleState(metronomeEnabled, juce::dontSendNotification);
+    metronomeButton.setColour(juce::TextButton::buttonColourId,
+                             metronomeEnabled ? juce::Colours::orange : juce::Colours::darkgrey);
+    
+    if (onMetronome)
+        onMetronome();
+}
+
+void TransportComponent::setMetronomeEnabled(bool enabled)
+{
+    metronomeEnabled = enabled;
+    metronomeButton.setToggleState(enabled, juce::dontSendNotification);
+    metronomeButton.setColour(juce::TextButton::buttonColourId,
+                             enabled ? juce::Colours::orange : juce::Colours::darkgrey);
+}
+
 void TransportComponent::tempoSliderChanged()
 {
     if (onTempoChanged)
@@ -1046,13 +1236,18 @@ MainComponent::MainComponent()
       currentPlayPosition(0.0),
       isPlaying(false),
       isRecording(false),
-      autoSyncEnabled(true)
+      autoSyncEnabled(true),
+      metronomeEnabled(false),
+      metronomePhase(0.0),
+      metronomeBeatInterval(60.0 / 120.0),
+      lastBeatTime(0.0),
+      metronomeVolume(0.5f)
 {
     setupTracks();
     setupTransport();
     setupLayout();
     
-    setSize(900, 800);
+    setSize(1000, 800);
     setAudioChannels(0, 2);
     
     startTimer(50);
@@ -1070,6 +1265,7 @@ MainComponent::~MainComponent()
         transportComponent->onRecord = nullptr;
         transportComponent->onTempoChanged = nullptr;
         transportComponent->onAutoSync = nullptr;
+        transportComponent->onMetronome = nullptr;
     }
     
     for (auto& track : audioTracks)
@@ -1126,6 +1322,12 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
                 
             track->processBlock(*bufferToFill.buffer, bufferToFill.startSample, numSamples);
         }
+    }
+    
+    // Process metronome
+    if (metronomeEnabled)
+    {
+        processMetronome(*bufferToFill.buffer, numSamples);
     }
     
     const double sampleRate = 44100.0;
@@ -1256,6 +1458,9 @@ void MainComponent::setTempo(double bpm)
     previousMasterTempo = masterTempo;
     masterTempo = bpm;
     
+    // Update metronome beat interval
+    metronomeBeatInterval = 60.0 / bpm;
+    
     for (auto& track : audioTracks)
     {
         if (track)
@@ -1268,6 +1473,43 @@ void MainComponent::setTempo(double bpm)
     {
         transportComponent->setTempo(bpm);
     }
+}
+
+void MainComponent::setInitialMasterBPM(double bpm, AudioTrack* definingTrack)
+{
+    juce::ScopedLock sl(audioLock);
+    
+    // Set Master BPM without affecting stretch ratios
+    previousMasterTempo = masterTempo;
+    masterTempo = bpm;
+    
+    // Update metronome beat interval
+    metronomeBeatInterval = 60.0 / bpm;
+    
+    // Ensure the defining track stays at 1.0 stretch and is set to the new master BPM
+    if (definingTrack)
+    {
+        definingTrack->setStretchRatio(1.0);
+        definingTrack->setMasterBPM(bpm);
+    }
+    
+    // Update all tracks' master BPM (but don't change their stretch ratios)
+    for (auto& track : audioTracks)
+    {
+        if (track && track.get() != definingTrack)
+        {
+            track->setMasterBPM(bpm);
+        }
+    }
+    
+    // Update transport display
+    if (transportComponent)
+    {
+        transportComponent->setTempo(bpm);
+    }
+    
+    juce::Logger::writeToLog("Initial Master BPM set to: " + juce::String(bpm, 1) +
+                            " by first loaded track (stretch factor: 1.00)");
 }
 
 void MainComponent::autoSyncAllTracks()
@@ -1343,6 +1585,95 @@ void MainComponent::syncNewTrackToMaster(AudioTrack* track)
     }
 }
 
+void MainComponent::toggleMetronome()
+{
+    metronomeEnabled = !metronomeEnabled;
+    
+    if (transportComponent)
+    {
+        transportComponent->setMetronomeEnabled(metronomeEnabled);
+    }
+    
+    // Reset metronome timing when toggled
+    metronomePhase = 0.0;
+    lastBeatTime = 0.0;
+}
+
+void MainComponent::processMetronome(juce::AudioBuffer<float>& buffer, int numSamples)
+{
+    if (!metronomeEnabled || !isPlaying)
+        return;
+    
+    const double sampleRate = 44100.0;
+    metronomeBeatInterval = 60.0 / masterTempo;
+    
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        double currentTime = currentPlayPosition + (sample / sampleRate);
+        
+        // Check if we've hit a beat
+        double timeSinceLastBeat = currentTime - lastBeatTime;
+        if (timeSinceLastBeat >= metronomeBeatInterval)
+        {
+            lastBeatTime = currentTime;
+            metronomePhase = 0.0; // Reset phase for new click
+        }
+        
+        // Generate click sound
+        float clickSample = generateClickSound(metronomePhase);
+        
+        // Add to both channels
+        if (buffer.getNumChannels() >= 1)
+            buffer.addSample(0, sample, clickSample * metronomeVolume);
+        if (buffer.getNumChannels() >= 2)
+            buffer.addSample(1, sample, clickSample * metronomeVolume);
+        
+        // Update phase
+        metronomePhase += 1.0 / sampleRate;
+    }
+}
+
+float MainComponent::generateClickSound(double phase)
+{
+    // Generate a short, dry click sound
+    const double clickDuration = 0.01; // 10ms click
+    
+    if (phase > clickDuration)
+        return 0.0f;
+    
+    // Create a short sine wave burst with envelope
+    const double frequency = 2000.0; // 2kHz click frequency
+    double envelope = 1.0 - (phase / clickDuration); // Linear decay
+    envelope = envelope * envelope; // Square for sharper decay
+    
+    double sineWave = std::sin(2.0 * juce::MathConstants<double>::pi * frequency * phase);
+    
+    return static_cast<float>(sineWave * envelope * 0.3); // Scale down volume
+}
+
+void MainComponent::onTrackLoaded(double trackBPM)
+{
+    // Count how many tracks have audio loaded and find the loaded track
+    int tracksWithAudio = 0;
+    AudioTrack* loadedTrack = nullptr;
+    
+    for (auto& track : audioTracks)
+    {
+        if (track && track->isLoaded())
+        {
+            tracksWithAudio++;
+            loadedTrack = track.get(); // This will be the most recently loaded track
+        }
+    }
+    
+    // If this is the first track loaded in the session (only 1 track has audio),
+    // set Master BPM to track's BPM using the special method that preserves stretch factor 1.0
+    if (tracksWithAudio == 1 && trackBPM > 0.0 && loadedTrack)
+    {
+        setInitialMasterBPM(trackBPM, loadedTrack);
+    }
+}
+
 void MainComponent::setupTracks()
 {
     for (int i = 0; i < maxTracks; ++i)
@@ -1350,6 +1681,9 @@ void MainComponent::setupTracks()
         audioTracks[i] = std::make_unique<AudioTrack>();
         audioTracks[i]->setMasterBPM(masterTempo);
         trackComponents[i] = std::make_unique<TrackComponent>(audioTracks[i].get(), i);
+        
+        // Set callback for when track loads audio
+        trackComponents[i]->onTrackLoaded = [this](double bpm) { onTrackLoaded(bpm); };
         
         tracksContainer.addAndMakeVisible(trackComponents[i].get());
     }
@@ -1365,6 +1699,7 @@ void MainComponent::setupTransport()
     transportComponent->onRecord = [this] { record(); };
     transportComponent->onTempoChanged = [this](double bpm) { setTempo(bpm); };
     transportComponent->onAutoSync = [this] { autoSyncAllTracks(); };
+    transportComponent->onMetronome = [this] { toggleMetronome(); };
 }
 
 void MainComponent::setupLayout()

@@ -17,6 +17,9 @@ public:
     void setPlayPosition(double positionInSeconds);
     void setDuration(double durationInSeconds);
     void setLooping(bool shouldLoop);
+    void setDetectedBPM(double bpm);
+    void setWaveformColour(const juce::Colour& colour);
+    void setQuantizeValue(int quantizeValue);
     
     std::function<void(double)> onPositionChanged;
 
@@ -27,8 +30,13 @@ private:
     double sampleRate;
     int totalSamples;
     bool isLooping;
+    double detectedBPM;
+    juce::Colour waveformColour;
+    int quantizeDivisions;
     
     void updatePositionFromMouse(const juce::MouseEvent& event);
+    void drawGrid(juce::Graphics& g, const juce::Rectangle<int>& area);
+    void drawBeatLines(juce::Graphics& g, const juce::Rectangle<int>& area);
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
 };
@@ -106,6 +114,10 @@ public:
     
     void updateTrackInfo();
     void updateWaveform();
+    
+    static juce::Colour getTrackColour(int trackNumber);
+    
+    std::function<void(double)> onTrackLoaded;
 
 private:
     AudioTrack* audioTrack;
@@ -116,6 +128,7 @@ private:
     juce::TextButton muteButton;
     juce::TextButton soloButton;
     juce::TextButton loopButton;
+    juce::TextButton quantizeButton;
     juce::Slider volumeSlider;
     juce::Slider stretchSlider;
     juce::Label trackLabel;
@@ -124,10 +137,13 @@ private:
     juce::Label stretchLabel;
     juce::Label volumeLabel;
     
+    int currentQuantize;
+    
     void loadButtonClicked();
     void muteButtonClicked();
     void soloButtonClicked();
     void loopButtonClicked();
+    void quantizeButtonClicked();
     void volumeSliderChanged();
     void stretchSliderChanged();
     void onWaveformPositionChanged(double position);
@@ -149,17 +165,20 @@ public:
     std::function<void()> onRecord;
     std::function<void(double)> onTempoChanged;
     std::function<void()> onAutoSync;
+    std::function<void()> onMetronome;
     
     void setPlaying(bool isPlaying);
     void setRecording(bool isRecording);
     void setTempo(double bpm);
     void setPosition(double positionInSeconds);
+    void setMetronomeEnabled(bool enabled);
 
 private:
     juce::TextButton playButton;
     juce::TextButton stopButton;
     juce::TextButton recordButton;
     juce::TextButton autoSyncButton;
+    juce::TextButton metronomeButton;
     juce::Slider tempoSlider;
     juce::Label tempoLabel;
     juce::Label positionLabel;
@@ -168,6 +187,7 @@ private:
     bool playing;
     bool recording;
     bool autoSyncEnabled;
+    bool metronomeEnabled;
     double currentTempo;
     double currentPosition;
     
@@ -175,6 +195,7 @@ private:
     void stopButtonClicked();
     void recordButtonClicked();
     void autoSyncButtonClicked();
+    void metronomeButtonClicked();
     void tempoSliderChanged();
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportComponent)
@@ -195,6 +216,8 @@ public:
     void resized() override;
     
     void timerCallback() override;
+    
+    void onTrackLoaded(double trackBPM);
 
 private:
     static constexpr int maxTracks = 8;
@@ -212,6 +235,13 @@ private:
     bool isPlaying;
     bool isRecording;
     bool autoSyncEnabled;
+    bool metronomeEnabled;
+    
+    // Metronome variables
+    double metronomePhase;
+    double metronomeBeatInterval;
+    double lastBeatTime;
+    double metronomeVolume;
     
     juce::CriticalSection audioLock;
     
@@ -219,11 +249,15 @@ private:
     void stop();
     void record();
     void setTempo(double bpm);
+    void setInitialMasterBPM(double bpm, AudioTrack* definingTrack);
     void autoSyncAllTracks();
     void updatePlayPosition();
     void setTrackPosition(int trackIndex, double position);
     double findAverageBPM();
     void syncNewTrackToMaster(AudioTrack* track);
+    void toggleMetronome();
+    void processMetronome(juce::AudioBuffer<float>& buffer, int numSamples);
+    float generateClickSound(double phase);
     
     void setupTracks();
     void setupTransport();
