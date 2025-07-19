@@ -1,4 +1,6 @@
 #include "MainComponent.h"
+#include <algorithm>
+#include <cmath>
 
 // ============================================================================
 // WaveformComponent Implementation
@@ -12,13 +14,22 @@ WaveformComponent::WaveformComponent()
       isLooping(true),
       detectedBPM(120.0),
       waveformColour(juce::Colour(0xff0080ff)),
-      quantizeDivisions(8)
+      quantizeDivisions(8),
+      zoomFactor(1.0),
+      viewStartTime(0.0),
+      draggedGridIndex(-1),
+      isDraggingGrid(false),
+      initialMouseX(0.0),
+      initialGridTime(0.0),
+      currentCursor(juce::MouseCursor::NormalCursor)
 {
+    setMouseCursor(juce::MouseCursor::NormalCursor);
 }
 
 WaveformComponent::~WaveformComponent()
 {
     onPositionChanged = nullptr;
+    onBPMChanged = nullptr;
 }
 
 void WaveformComponent::paint(juce::Graphics& g)
@@ -57,40 +68,56 @@ void WaveformComponent::paint(juce::Graphics& g)
         juce::Path waveformPath;
         bool pathStarted = false;
         
+        // Calculate visible time range based on zoom
+        double visibleDuration = totalDuration / zoomFactor;
+        double endTime = juce::jmin(viewStartTime + visibleDuration, totalDuration);
+        
         for (int x = 0; x < width; ++x)
         {
-            // Map x position to waveform data
-            int peakIndex = juce::jmap(x, 0, width, 0, (int)waveformPeaks.size() - 1);
-            peakIndex = juce::jlimit(0, (int)waveformPeaks.size() - 1, peakIndex);
+            // Map x position to time considering zoom and view offset
+            double timePosition = viewStartTime + (x / (double)width) * (endTime - viewStartTime);
+            double normalizedPos = timePosition / totalDuration;
             
-            float peak = waveformPeaks[peakIndex];
-            int waveHeight = (int)(peak * height * 0.4f); // Scale waveform
-            
-            int topY = centerY - waveHeight;
-            int bottomY = centerY + waveHeight;
-            
-            if (!pathStarted)
+            if (normalizedPos >= 0.0 && normalizedPos <= 1.0)
             {
-                waveformPath.startNewSubPath(area.getX() + x, topY);
-                pathStarted = true;
-            }
-            else
-            {
-                waveformPath.lineTo(area.getX() + x, topY);
+                int peakIndex = (int)(normalizedPos * (waveformPeaks.size() - 1));
+                peakIndex = juce::jlimit(0, (int)waveformPeaks.size() - 1, peakIndex);
+                
+                float peak = waveformPeaks[peakIndex];
+                int waveHeight = (int)(peak * height * 0.4f);
+                
+                int topY = centerY - waveHeight;
+                int bottomY = centerY + waveHeight;
+                
+                if (!pathStarted)
+                {
+                    waveformPath.startNewSubPath(area.getX() + x, topY);
+                    pathStarted = true;
+                }
+                else
+                {
+                    waveformPath.lineTo(area.getX() + x, topY);
+                }
             }
         }
         
         // Complete the waveform shape
         for (int x = width - 1; x >= 0; --x)
         {
-            int peakIndex = juce::jmap(x, 0, width, 0, (int)waveformPeaks.size() - 1);
-            peakIndex = juce::jlimit(0, (int)waveformPeaks.size() - 1, peakIndex);
+            double timePosition = viewStartTime + (x / (double)width) * (endTime - viewStartTime);
+            double normalizedPos = timePosition / totalDuration;
             
-            float peak = waveformPeaks[peakIndex];
-            int waveHeight = (int)(peak * height * 0.4f);
-            int bottomY = centerY + waveHeight;
-            
-            waveformPath.lineTo(area.getX() + x, bottomY);
+            if (normalizedPos >= 0.0 && normalizedPos <= 1.0)
+            {
+                int peakIndex = (int)(normalizedPos * (waveformPeaks.size() - 1));
+                peakIndex = juce::jlimit(0, (int)waveformPeaks.size() - 1, peakIndex);
+                
+                float peak = waveformPeaks[peakIndex];
+                int waveHeight = (int)(peak * height * 0.4f);
+                int bottomY = centerY + waveHeight;
+                
+                waveformPath.lineTo(area.getX() + x, bottomY);
+            }
         }
         
         waveformPath.closeSubPath();
@@ -103,14 +130,16 @@ void WaveformComponent::paint(juce::Graphics& g)
     // Draw playback position
     if (totalDuration > 0.0)
     {
-        double normalizedPosition = currentPosition / totalDuration;
-        int positionX = area.getX() + (int)(normalizedPosition * width);
+        int positionX = (int)timeToPixel(currentPosition, area);
         
-        g.setColour(juce::Colours::yellow);
-        g.drawVerticalLine(positionX, area.getY(), area.getBottom());
-        
-        // Draw position marker
-        g.fillEllipse(positionX - 3, area.getY() - 3, 6, 6);
+        if (positionX >= area.getX() && positionX <= area.getRight())
+        {
+            g.setColour(juce::Colours::yellow);
+            g.drawVerticalLine(positionX, area.getY(), area.getBottom());
+            
+            // Draw position marker
+            g.fillEllipse(positionX - 3, area.getY() - 3, 6, 6);
+        }
     }
     
     // Draw loop indicator
@@ -118,6 +147,15 @@ void WaveformComponent::paint(juce::Graphics& g)
     {
         g.setColour(juce::Colours::green.withAlpha(0.3f));
         g.fillRect(area.getX(), area.getBottom() - 3, area.getWidth(), 3);
+    }
+    
+    // Draw zoom info
+    if (zoomFactor > 1.01)
+    {
+        g.setColour(juce::Colours::cyan.withAlpha(0.8f));
+        g.setFont(10.0f);
+        g.drawText("Zoom: " + juce::String(zoomFactor, 1) + "x",
+                  area.getX() + 5, area.getY() + 5, 80, 15, juce::Justification::left);
     }
 }
 
@@ -143,70 +181,235 @@ void WaveformComponent::drawGrid(juce::Graphics& g, const juce::Rectangle<int>& 
 
 void WaveformComponent::drawBeatLines(juce::Graphics& g, const juce::Rectangle<int>& area)
 {
-    if (totalDuration <= 0.0 || quantizeDivisions <= 0)
+    if (totalDuration <= 0.0 || quantizeDivisions <= 0 || detectedBPM <= 0.0)
         return;
     
-    // Calculate exact interval by dividing total duration by chosen divisions
-    double divisionInterval = totalDuration / (double)quantizeDivisions;
+    // Calculate beat interval from BPM
+    double beatInterval = 60.0 / detectedBPM;
+    
+    // Calculate how many beats fit in the current view
+    double visibleDuration = totalDuration / zoomFactor;
+    double endTime = juce::jmin(viewStartTime + visibleDuration, totalDuration);
+    
+    // Find first beat visible in current view
+    double firstBeat = std::ceil(viewStartTime / beatInterval) * beatInterval;
     
     g.setColour(juce::Colours::white.withAlpha(0.15f));
     
-    const int width = area.getWidth();
-    
-    // Draw vertical lines at each division (excluding start and end)
-    for (int i = 1; i < quantizeDivisions; ++i)
+    // Draw beat lines
+    for (double beatTime = firstBeat; beatTime < endTime; beatTime += beatInterval)
     {
-        double divisionTime = i * divisionInterval;
-        double normalizedPosition = divisionTime / totalDuration;
-        int divisionX = area.getX() + (int)(normalizedPosition * width);
-        
-        if (divisionX >= area.getX() && divisionX < area.getRight())
+        if (beatTime >= viewStartTime && beatTime <= endTime)
         {
-            // Draw stronger line for every 4th division (downbeats)
-            if (i % 4 == 0)
+            int beatX = (int)timeToPixel(beatTime, area);
+            
+            if (beatX >= area.getX() && beatX < area.getRight())
             {
-                g.setColour(juce::Colours::white.withAlpha(0.25f));
-                g.drawVerticalLine(divisionX, area.getY(), area.getBottom());
-                g.setColour(juce::Colours::white.withAlpha(0.15f));
-            }
-            else
-            {
-                g.drawVerticalLine(divisionX, area.getY(), area.getBottom());
+                // Check if this is a downbeat (every 4 beats)
+                int beatNumber = (int)std::round(beatTime / beatInterval);
+                bool isDownbeat = (beatNumber % 4 == 0);
+                
+                if (isDownbeat)
+                {
+                    g.setColour(juce::Colours::white.withAlpha(0.35f));
+                    g.drawVerticalLine(beatX, area.getY(), area.getBottom());
+                    g.setColour(juce::Colours::white.withAlpha(0.15f));
+                }
+                else
+                {
+                    g.drawVerticalLine(beatX, area.getY(), area.getBottom());
+                }
             }
         }
     }
+    
+    // Highlight draggable grid lines
+    if (isDraggingGrid && draggedGridIndex >= 0)
+    {
+        g.setColour(juce::Colours::yellow.withAlpha(0.6f));
+        double draggedBeatTime = draggedGridIndex * beatInterval;
+        int draggedX = (int)timeToPixel(draggedBeatTime, area);
+        g.drawVerticalLine(draggedX, area.getY(), area.getBottom());
+    }
 }
 
-void WaveformComponent::setQuantizeValue(int quantizeValue)
+void WaveformComponent::initializeGridPositions()
 {
-    if (quantizeDivisions != quantizeValue)
+    gridPositions.clear();
+    
+    if (detectedBPM <= 0.0 || totalDuration <= 0.0)
+        return;
+    
+    double beatInterval = 60.0 / detectedBPM;
+    
+    for (double beatTime = 0.0; beatTime < totalDuration; beatTime += beatInterval)
     {
-        quantizeDivisions = quantizeValue;
+        gridPositions.push_back(beatTime);
+    }
+}
+
+int WaveformComponent::findGridLineAtPosition(int mouseX, const juce::Rectangle<int>& area)
+{
+    if (detectedBPM <= 0.0)
+        return -1;
+    
+    double mouseTime = pixelToTime(mouseX, area);
+    double beatInterval = 60.0 / detectedBPM;
+    
+    // Find closest beat line
+    int closestBeat = (int)std::round(mouseTime / beatInterval);
+    double closestBeatTime = closestBeat * beatInterval;
+    
+    // Check if mouse is close enough to this beat line
+    int beatX = (int)timeToPixel(closestBeatTime, area);
+    
+    if (std::abs(mouseX - beatX) <= 5) // 5 pixel tolerance
+    {
+        return closestBeat;
+    }
+    
+    return -1;
+}
+
+void WaveformComponent::updateBPMFromGrid()
+{
+    if (draggedGridIndex <= 0 || !isDraggingGrid)
+        return;
+    
+    // Calculate new BPM based on dragged grid position
+    double draggedBeatTime = gridPositions[draggedGridIndex];
+    double newBeatInterval = draggedBeatTime / draggedGridIndex;
+    double newBPM = 60.0 / newBeatInterval;
+    
+    // Constrain to reasonable BPM range
+    newBPM = juce::jlimit(60.0, 200.0, newBPM);
+    
+    if (std::abs(newBPM - detectedBPM) > 0.1)
+    {
+        detectedBPM = newBPM;
+        initializeGridPositions();
+        
+        if (onBPMChanged)
+        {
+            onBPMChanged(detectedBPM);
+        }
+        
         repaint();
     }
 }
 
+void WaveformComponent::updateCursor(const juce::MouseEvent& event)
+{
+    juce::Rectangle<int> area = getLocalBounds().reduced(2);
+    int gridIndex = findGridLineAtPosition(event.x, area);
+    
+    if (gridIndex >= 0)
+    {
+        setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+    }
+    else
+    {
+        setMouseCursor(juce::MouseCursor::NormalCursor);
+    }
+}
+
+double WaveformComponent::timeToPixel(double timeInSeconds, const juce::Rectangle<int>& area) const
+{
+    if (totalDuration <= 0.0)
+        return area.getX();
+    
+    double visibleDuration = totalDuration / zoomFactor;
+    double endTime = juce::jmin(viewStartTime + visibleDuration, totalDuration);
+    
+    if (timeInSeconds < viewStartTime || timeInSeconds > endTime)
+        return -1; // Outside visible range
+    
+    double normalizedPosition = (timeInSeconds - viewStartTime) / (endTime - viewStartTime);
+    return area.getX() + normalizedPosition * area.getWidth();
+}
+
+double WaveformComponent::pixelToTime(int pixelX, const juce::Rectangle<int>& area) const
+{
+    if (totalDuration <= 0.0)
+        return 0.0;
+    
+    double visibleDuration = totalDuration / zoomFactor;
+    double endTime = juce::jmin(viewStartTime + visibleDuration, totalDuration);
+    
+    double normalizedPosition = (double)(pixelX - area.getX()) / area.getWidth();
+    normalizedPosition = juce::jlimit(0.0, 1.0, normalizedPosition);
+    
+    return viewStartTime + normalizedPosition * (endTime - viewStartTime);
+}
+
 void WaveformComponent::mouseDown(const juce::MouseEvent& event)
 {
-    updatePositionFromMouse(event);
+    juce::Rectangle<int> area = getLocalBounds().reduced(2);
+    
+    // Check if clicking on a grid line
+    int gridIndex = findGridLineAtPosition(event.x, area);
+    
+    if (gridIndex >= 0)
+    {
+        isDraggingGrid = true;
+        draggedGridIndex = gridIndex;
+        initialMouseX = event.x;
+        
+        if (gridIndex < (int)gridPositions.size())
+        {
+            initialGridTime = gridPositions[gridIndex];
+        }
+    }
+    else
+    {
+        // Normal position update
+        updatePositionFromMouse(event);
+    }
 }
 
 void WaveformComponent::mouseDrag(const juce::MouseEvent& event)
 {
-    updatePositionFromMouse(event);
+    if (isDraggingGrid && draggedGridIndex >= 0)
+    {
+        juce::Rectangle<int> area = getLocalBounds().reduced(2);
+        
+        // Update grid position based on drag
+        double newTime = pixelToTime(event.x, area);
+        newTime = juce::jlimit(0.0, totalDuration, newTime);
+        
+        if (draggedGridIndex < (int)gridPositions.size())
+        {
+            gridPositions[draggedGridIndex] = newTime;
+            updateBPMFromGrid();
+        }
+    }
+    else
+    {
+        updatePositionFromMouse(event);
+    }
+}
+
+void WaveformComponent::mouseMove(const juce::MouseEvent& event)
+{
+    updateCursor(event);
+}
+
+void WaveformComponent::mouseExit(const juce::MouseEvent& event)
+{
+    juce::ignoreUnused(event);
+    isDraggingGrid = false;
+    draggedGridIndex = -1;
+    setMouseCursor(juce::MouseCursor::NormalCursor);
 }
 
 void WaveformComponent::updatePositionFromMouse(const juce::MouseEvent& event)
 {
-    if (totalDuration <= 0.0)
+    if (totalDuration <= 0.0 || isDraggingGrid)
         return;
     
     juce::Rectangle<int> area = getLocalBounds().reduced(2);
-    int mouseX = event.x - area.getX();
-    double normalizedPosition = (double)mouseX / area.getWidth();
-    normalizedPosition = juce::jlimit(0.0, 1.0, normalizedPosition);
-    
-    double newPosition = normalizedPosition * totalDuration;
+    double newPosition = pixelToTime(event.x, area);
+    newPosition = juce::jlimit(0.0, totalDuration, newPosition);
     
     if (onPositionChanged)
     {
@@ -222,6 +425,8 @@ void WaveformComponent::setWaveformData(const std::vector<float>& peaks, double 
     sampleRate = sr;
     totalSamples = samples;
     totalDuration = samples / sr;
+    viewStartTime = 0.0;
+    initializeGridPositions();
     repaint();
 }
 
@@ -237,6 +442,7 @@ void WaveformComponent::setPlayPosition(double positionInSeconds)
 void WaveformComponent::setDuration(double durationInSeconds)
 {
     totalDuration = durationInSeconds;
+    initializeGridPositions();
     repaint();
 }
 
@@ -254,6 +460,7 @@ void WaveformComponent::setDetectedBPM(double bpm)
     if (detectedBPM != bpm)
     {
         detectedBPM = bpm;
+        initializeGridPositions();
         repaint();
     }
 }
@@ -263,6 +470,35 @@ void WaveformComponent::setWaveformColour(const juce::Colour& colour)
     if (waveformColour != colour)
     {
         waveformColour = colour;
+        repaint();
+    }
+}
+
+void WaveformComponent::setQuantizeValue(int quantizeValue)
+{
+    if (quantizeDivisions != quantizeValue)
+    {
+        quantizeDivisions = quantizeValue;
+        repaint();
+    }
+}
+
+void WaveformComponent::setZoomFactor(double zoom)
+{
+    double newZoom = juce::jlimit(0.1, 10.0, zoom);
+    
+    if (std::abs(zoomFactor - newZoom) > 0.01)
+    {
+        // Adjust view start time to keep zoom centered
+        double visibleDuration = totalDuration / zoomFactor;
+        double centerTime = viewStartTime + visibleDuration * 0.5;
+        
+        zoomFactor = newZoom;
+        
+        double newVisibleDuration = totalDuration / zoomFactor;
+        viewStartTime = centerTime - newVisibleDuration * 0.5;
+        viewStartTime = juce::jlimit(0.0, totalDuration - newVisibleDuration, viewStartTime);
+        
         repaint();
     }
 }
@@ -316,15 +552,389 @@ void AudioTrack::loadAudioFile(const juce::File& file)
         stretchRatio = 1.0;
         
         generateWaveformPeaks();
-        detectedBPM = detectBPM();
-        initializeSoundTouch();
         
+        // Advanced BPM detection
+        detectedBPM = detectBPMFromOnsets();
+        
+        // Fallback to autocorrelation if onset detection fails
+        if (detectedBPM < 60.0 || detectedBPM > 200.0)
+        {
+            detectedBPM = detectBPMAutocorrelation();
+        }
+        
+        // Final fallback to pattern-based detection
+        if (detectedBPM < 60.0 || detectedBPM > 200.0)
+        {
+            detectedBPM = detectBPMImproved();
+        }
+        
+        // Ultimate fallback
+        if (detectedBPM < 60.0 || detectedBPM > 200.0)
+        {
+            detectedBPM = 120.0;
+            juce::Logger::writeToLog("BPM detection failed for " + fileName + " - using 120 BPM default. Use manual grid adjustment.");
+        }
+        
+        initializeSoundTouch();
         stretchedBuffer.setSize(reader->numChannels, 8192, false, false, true);
         
         juce::Logger::writeToLog("Loaded: " + fileName +
-                                " - Detected BPM: " + juce::String(detectedBPM, 1) +
-                                " - Stretch Ratio: " + juce::String(stretchRatio, 3) +
-                                " (SoundTouch mode)");
+                                " - BPM: " + juce::String(detectedBPM, 1) +
+                                " (Advanced detection with manual adjustment available)");
+    }
+}
+
+double AudioTrack::detectBPMFromOnsets()
+{
+    if (!isLoaded() || audioBuffer.getNumSamples() < (int)sampleRate)
+        return 120.0;
+    
+    std::vector<float> onsetStrength = calculateOnsetStrength();
+    
+    if (onsetStrength.size() < 10)
+        return 120.0;
+    
+    // Find peaks in onset strength
+    std::vector<double> onsetTimes;
+    const double hopSize = 512.0;
+    const double threshold = 0.3;
+    
+    if (!onsetStrength.empty())
+    {
+        float maxOnset = *std::max_element(onsetStrength.begin(), onsetStrength.end());
+        float adaptiveThreshold = maxOnset * threshold;
+        
+        for (int i = 1; i < (int)onsetStrength.size() - 1; ++i)
+        {
+            if (onsetStrength[i] > adaptiveThreshold &&
+                onsetStrength[i] > onsetStrength[i-1] &&
+                onsetStrength[i] > onsetStrength[i+1])
+            {
+                double onsetTime = (i * hopSize) / sampleRate;
+                onsetTimes.push_back(onsetTime);
+            }
+        }
+    }
+    
+    if (onsetTimes.size() < 4)
+        return 120.0;
+    
+    return findBestBPMCandidate(onsetTimes);
+}
+
+std::vector<float> AudioTrack::calculateOnsetStrength()
+{
+    const int hopSize = 512;
+    const int frameSize = 1024;
+    const int numSamples = audioBuffer.getNumSamples();
+    const int numChannels = audioBuffer.getNumChannels();
+    
+    std::vector<float> onsetStrength;
+    std::vector<float> prevSpectrum(frameSize / 2, 0.0f);
+    
+    for (int pos = 0; pos < numSamples - frameSize; pos += hopSize)
+    {
+        std::vector<float> currentSpectrum(frameSize / 2, 0.0f);
+        
+        // Simple spectral magnitude calculation (without FFT for simplicity)
+        for (int bin = 0; bin < frameSize / 2; ++bin)
+        {
+            float magnitude = 0.0f;
+            
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                if (pos + bin < numSamples)
+                {
+                    float sample = audioBuffer.getSample(ch, pos + bin);
+                    magnitude += std::abs(sample);
+                }
+            }
+            
+            currentSpectrum[bin] = magnitude / numChannels;
+        }
+        
+        // Calculate spectral flux (onset strength)
+        float flux = 0.0f;
+        for (int bin = 0; bin < frameSize / 2; ++bin)
+        {
+            float diff = currentSpectrum[bin] - prevSpectrum[bin];
+            if (diff > 0)
+                flux += diff;
+        }
+        
+        onsetStrength.push_back(flux);
+        prevSpectrum = currentSpectrum;
+    }
+    
+    return onsetStrength;
+}
+
+double AudioTrack::findBestBPMCandidate(const std::vector<double>& onsetTimes)
+{
+    if (onsetTimes.size() < 4)
+        return 120.0;
+    
+    // Calculate intervals between consecutive onsets
+    std::vector<double> intervals;
+    for (size_t i = 1; i < onsetTimes.size(); ++i)
+    {
+        double interval = onsetTimes[i] - onsetTimes[i-1];
+        if (interval > 0.1 && interval < 2.0) // Reasonable beat interval range
+        {
+            intervals.push_back(interval);
+        }
+    }
+    
+    if (intervals.empty())
+        return 120.0;
+    
+    // Find most common interval (histogram approach)
+    std::sort(intervals.begin(), intervals.end());
+    
+    const double tolerance = 0.05;
+    double bestInterval = 0.0;
+    int maxCount = 0;
+    
+    for (size_t i = 0; i < intervals.size(); ++i)
+    {
+        int count = 1;
+        double currentInterval = intervals[i];
+        
+        for (size_t j = i + 1; j < intervals.size(); ++j)
+        {
+            if (std::abs(intervals[j] - currentInterval) <= tolerance)
+            {
+                count++;
+            }
+            else
+            {
+                break;
+            }
+        }
+        
+        if (count > maxCount)
+        {
+            maxCount = count;
+            bestInterval = currentInterval;
+        }
+    }
+    
+    if (bestInterval > 0.0)
+    {
+        double bpm = 60.0 / bestInterval;
+        
+        // Octave correction for musical tempos
+        while (bpm < 70.0 && bpm > 0.0) bpm *= 2.0;
+        while (bpm > 180.0) bpm /= 2.0;
+        
+        return bpm;
+    }
+    
+    return 120.0;
+}
+
+double AudioTrack::detectBPMAutocorrelation()
+{
+    const int numSamples = audioBuffer.getNumSamples();
+    if (numSamples < (int)sampleRate) return 120.0;
+    
+    // Use mono sum for analysis
+    std::vector<float> monoSignal(numSamples);
+    const int numChannels = audioBuffer.getNumChannels();
+    
+    for (int i = 0; i < numSamples; ++i)
+    {
+        float sum = 0.0f;
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            sum += audioBuffer.getSample(ch, i);
+        }
+        monoSignal[i] = sum / numChannels;
+    }
+    
+    // Calculate onset strength function
+    const int hopSize = 512;
+    const int frameSize = 1024;
+    std::vector<float> onsetStrength;
+    
+    for (int pos = 0; pos < numSamples - frameSize; pos += hopSize)
+    {
+        float energy = 0.0f;
+        float prevEnergy = 0.0f;
+        
+        // Current frame energy
+        for (int i = 0; i < frameSize; ++i)
+        {
+            if (pos + i < numSamples)
+                energy += monoSignal[pos + i] * monoSignal[pos + i];
+        }
+        
+        // Previous frame energy
+        for (int i = 0; i < frameSize; ++i)
+        {
+            if (pos - hopSize + i >= 0 && pos - hopSize + i < numSamples)
+                prevEnergy += monoSignal[pos - hopSize + i] * monoSignal[pos - hopSize + i];
+        }
+        
+        float strength = juce::jmax(0.0f, energy - prevEnergy);
+        onsetStrength.push_back(strength);
+    }
+    
+    if (onsetStrength.size() < 10) return 120.0;
+    
+    // Autocorrelation on onset strength
+    const int minLag = (int)(60.0 * sampleRate / (200.0 * hopSize)); // 200 BPM max
+    const int maxLag = (int)(60.0 * sampleRate / (60.0 * hopSize));   // 60 BPM min
+    
+    double bestCorr = 0.0;
+    int bestLag = minLag;
+    
+    for (int lag = minLag; lag < maxLag && lag < (int)onsetStrength.size() / 2; ++lag)
+    {
+        double correlation = 0.0;
+        int count = 0;
+        
+        for (int i = 0; i < (int)onsetStrength.size() - lag; ++i)
+        {
+            correlation += onsetStrength[i] * onsetStrength[i + lag];
+            count++;
+        }
+        
+        if (count > 0)
+        {
+            correlation /= count;
+            
+            if (correlation > bestCorr)
+            {
+                bestCorr = correlation;
+                bestLag = lag;
+            }
+        }
+    }
+    
+    // Convert lag to BPM
+    double beatInterval = (bestLag * hopSize) / sampleRate;
+    double bpm = 60.0 / beatInterval;
+    
+    // Octave correction for musical tempos
+    while (bpm < 70.0 && bpm > 0.0) bpm *= 2.0;
+    while (bpm > 180.0) bpm /= 2.0;
+    
+    return bpm;
+}
+
+std::vector<double> AudioTrack::calculateBeatTrack()
+{
+    std::vector<double> beatTimes;
+    
+    if (!isLoaded() || audioBuffer.getNumSamples() == 0)
+        return beatTimes;
+    
+    const int hopSize = 512;
+    const int frameSize = 1024;
+    const int numSamples = audioBuffer.getNumSamples();
+    
+    // Calculate spectral flux
+    std::vector<float> spectralFlux;
+    std::vector<float> prevMagnitudes(frameSize / 2, 0.0f);
+    
+    for (int pos = 0; pos < numSamples - frameSize; pos += hopSize)
+    {
+        std::vector<float> magnitudes(frameSize / 2, 0.0f);
+        
+        for (int i = 0; i < frameSize / 2; ++i)
+        {
+            if (pos + i < numSamples)
+            {
+                float sample = audioBuffer.getSample(0, pos + i);
+                magnitudes[i] = std::abs(sample);
+            }
+        }
+        
+        float flux = 0.0f;
+        for (int i = 0; i < frameSize / 2; ++i)
+        {
+            float diff = magnitudes[i] - prevMagnitudes[i];
+            if (diff > 0) flux += diff;
+        }
+        
+        spectralFlux.push_back(flux);
+        prevMagnitudes = magnitudes;
+    }
+    
+    // Peak picking on spectral flux
+    const float threshold = 0.3f;
+    if (!spectralFlux.empty())
+    {
+        float maxFlux = *std::max_element(spectralFlux.begin(), spectralFlux.end());
+        float adaptiveThreshold = maxFlux * threshold;
+        
+        for (int i = 1; i < (int)spectralFlux.size() - 1; ++i)
+        {
+            if (spectralFlux[i] > adaptiveThreshold &&
+                spectralFlux[i] > spectralFlux[i-1] &&
+                spectralFlux[i] > spectralFlux[i+1])
+            {
+                double beatTime = (i * hopSize) / sampleRate;
+                beatTimes.push_back(beatTime);
+            }
+        }
+    }
+    
+    return beatTimes;
+}
+
+double AudioTrack::detectBPMImproved()
+{
+    if (!isLoaded() || audioBuffer.getNumSamples() == 0)
+        return 120.0;
+    
+    const double duration = getDurationInSeconds();
+    
+    // For common musical loop patterns (4, 8, 16, 32 beats)
+    std::vector<double> possibleBPMs;
+    
+    for (int beats : {4, 8, 16, 32})
+    {
+        double bpm = (beats * 60.0) / duration;
+        if (bpm >= 60.0 && bpm <= 200.0)
+        {
+            possibleBPMs.push_back(bpm);
+        }
+    }
+    
+    if (!possibleBPMs.empty())
+    {
+        for (double bpm : possibleBPMs)
+        {
+            if (bpm >= 65.0 && bpm <= 150.0)
+            {
+                return bpm;
+            }
+        }
+        return possibleBPMs[0];
+    }
+    
+    return 120.0;
+}
+
+void AudioTrack::setManualBPM(double bpm)
+{
+    juce::ScopedLock sl(lock);
+    
+    if (bpm >= 60.0 && bpm <= 200.0)
+    {
+        detectedBPM = bpm;
+        juce::Logger::writeToLog("Manual BPM set to: " + juce::String(bpm, 1) + " for " + fileName);
+    }
+}
+
+void AudioTrack::autoSyncToMaster()
+{
+    if (detectedBPM > 0.0 && masterBPM > 0.0)
+    {
+        double syncRatio = detectedBPM / masterBPM;
+        setStretchRatio(syncRatio);
     }
 }
 
@@ -597,99 +1207,6 @@ double AudioTrack::getDurationInSeconds() const
     return 0.0;
 }
 
-double AudioTrack::detectBPM()
-{
-    if (!isLoaded() || audioBuffer.getNumSamples() == 0)
-        return 0.0;
-    
-    const int hopSize = 512;
-    const int fftSize = 1024;
-    const float* audioData = audioBuffer.getReadPointer(0);
-    const int numSamples = audioBuffer.getNumSamples();
-    
-    std::vector<float> onsetStrengths;
-    std::vector<float> prevSpectrum(fftSize / 2, 0.0f);
-    
-    for (int i = 0; i < numSamples - fftSize; i += hopSize)
-    {
-        std::vector<float> window(fftSize);
-        
-        for (int j = 0; j < fftSize; ++j)
-        {
-            if (i + j < numSamples)
-            {
-                float hannWindow = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * j / (fftSize - 1)));
-                window[j] = audioData[i + j] * hannWindow;
-            }
-        }
-        
-        std::vector<float> spectrum(fftSize / 2, 0.0f);
-        for (int j = 0; j < fftSize / 2; ++j)
-        {
-            spectrum[j] = window[j] * window[j];
-        }
-        
-        float onsetStrength = 0.0f;
-        for (int j = 0; j < fftSize / 2; ++j)
-        {
-            float diff = spectrum[j] - prevSpectrum[j];
-            if (diff > 0.0f)
-                onsetStrength += diff;
-        }
-        
-        onsetStrengths.push_back(onsetStrength);
-        prevSpectrum = spectrum;
-    }
-    
-    std::vector<int> peakIndices;
-    const float threshold = *std::max_element(onsetStrengths.begin(), onsetStrengths.end()) * 0.3f;
-    
-    for (int i = 1; i < onsetStrengths.size() - 1; ++i)
-    {
-        if (onsetStrengths[i] > threshold &&
-            onsetStrengths[i] > onsetStrengths[i-1] &&
-            onsetStrengths[i] > onsetStrengths[i+1])
-        {
-            peakIndices.push_back(i);
-        }
-    }
-    
-    if (peakIndices.size() < 4)
-        return 120.0;
-    
-    std::vector<double> intervals;
-    for (int i = 1; i < peakIndices.size(); ++i)
-    {
-        double interval = (peakIndices[i] - peakIndices[i-1]) * hopSize / sampleRate;
-        if (interval > 0.2 && interval < 2.0)
-            intervals.push_back(interval);
-    }
-    
-    if (intervals.empty())
-        return 120.0;
-    
-    std::sort(intervals.begin(), intervals.end());
-    double medianInterval = intervals[intervals.size() / 2];
-    
-    double bpm = 60.0 / medianInterval;
-    
-    if (bpm < 60.0) bpm *= 2.0;
-    if (bpm > 200.0) bpm /= 2.0;
-    if (bpm < 60.0) bpm = 120.0;
-    if (bpm > 200.0) bpm = 120.0;
-    
-    return bpm;
-}
-
-void AudioTrack::autoSyncToMaster()
-{
-    if (detectedBPM > 0.0 && masterBPM > 0.0)
-    {
-        double syncRatio = detectedBPM / masterBPM;
-        setStretchRatio(syncRatio);
-    }
-}
-
 // ============================================================================
 // TrackComponent Implementation
 // ============================================================================
@@ -702,6 +1219,9 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
       soloButton("S"),
       loopButton("Loop"),
       quantizeButton("Q:8"),
+      bpmEditButton("Edit"),
+      zoomInButton("+"),
+      zoomOutButton("-"),
       volumeSlider(juce::Slider::LinearHorizontal, juce::Slider::NoTextBox),
       stretchSlider(juce::Slider::LinearHorizontal, juce::Slider::NoTextBox),
       trackLabel("trackLabel", "Track " + juce::String(trackNumber + 1)),
@@ -709,12 +1229,14 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
       bpmLabel("bpmLabel", "BPM: --"),
       stretchLabel("stretchLabel", "Stretch: 1.00x"),
       volumeLabel("volumeLabel", "Vol"),
-      currentQuantize(8)
+      zoomLabel("zoomLabel", "Zoom"),
+      currentQuantize(8),
+      editingBPM(false),
+      currentZoom(1.0)
 {
     waveformDisplay = std::make_unique<WaveformComponent>();
     addAndMakeVisible(waveformDisplay.get());
     
-    // Set track-specific color for waveform
     waveformDisplay->setWaveformColour(getTrackColour(trackNumber));
     waveformDisplay->setQuantizeValue(currentQuantize);
     
@@ -723,6 +1245,9 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
     addAndMakeVisible(soloButton);
     addAndMakeVisible(loopButton);
     addAndMakeVisible(quantizeButton);
+    addAndMakeVisible(bpmEditButton);
+    addAndMakeVisible(zoomInButton);
+    addAndMakeVisible(zoomOutButton);
     addAndMakeVisible(volumeSlider);
     addAndMakeVisible(stretchSlider);
     addAndMakeVisible(trackLabel);
@@ -730,12 +1255,16 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
     addAndMakeVisible(bpmLabel);
     addAndMakeVisible(stretchLabel);
     addAndMakeVisible(volumeLabel);
+    addAndMakeVisible(zoomLabel);
     
     loadButton.onClick = [this] { loadButtonClicked(); };
     muteButton.onClick = [this] { muteButtonClicked(); };
     soloButton.onClick = [this] { soloButtonClicked(); };
     loopButton.onClick = [this] { loopButtonClicked(); };
     quantizeButton.onClick = [this] { quantizeButtonClicked(); };
+    bpmEditButton.onClick = [this] { bpmEditButtonClicked(); };
+    zoomInButton.onClick = [this] { zoomInButtonClicked(); };
+    zoomOutButton.onClick = [this] { zoomOutButtonClicked(); };
     
     volumeSlider.setRange(0.0, 1.0, 0.01);
     volumeSlider.setValue(1.0);
@@ -746,24 +1275,29 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
     stretchSlider.onValueChange = [this] { stretchSliderChanged(); };
     
     waveformDisplay->onPositionChanged = [this](double position) { onWaveformPositionChanged(position); };
+    waveformDisplay->onBPMChanged = [this](double bpm) { onWaveformBPMChanged(bpm); };
     
     muteButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
     soloButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
     loopButton.setColour(juce::TextButton::buttonColourId, juce::Colours::green.darker());
     quantizeButton.setColour(juce::TextButton::buttonColourId, juce::Colours::purple.darker());
+    bpmEditButton.setColour(juce::TextButton::buttonColourId, juce::Colours::orange.darker());
+    zoomInButton.setColour(juce::TextButton::buttonColourId, juce::Colours::blue.darker());
+    zoomOutButton.setColour(juce::TextButton::buttonColourId, juce::Colours::blue.darker());
     
     trackLabel.setFont(juce::Font(14.0f, juce::Font::bold));
     fileLabel.setFont(juce::Font(12.0f));
     bpmLabel.setFont(juce::Font(11.0f));
     stretchLabel.setFont(juce::Font(11.0f));
     volumeLabel.setFont(juce::Font(11.0f));
+    zoomLabel.setFont(juce::Font(11.0f));
     
     fileLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
     bpmLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
     stretchLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
     volumeLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    zoomLabel.setColour(juce::Label::textColourId, juce::Colours::cyan);
     
-    // Set track label color to match waveform
     trackLabel.setColour(juce::Label::textColourId, getTrackColour(trackNumber));
     
     loopButton.setToggleState(true, juce::dontSendNotification);
@@ -776,6 +1310,9 @@ TrackComponent::~TrackComponent()
     soloButton.onClick = nullptr;
     loopButton.onClick = nullptr;
     quantizeButton.onClick = nullptr;
+    bpmEditButton.onClick = nullptr;
+    zoomInButton.onClick = nullptr;
+    zoomOutButton.onClick = nullptr;
     volumeSlider.onValueChange = nullptr;
     stretchSlider.onValueChange = nullptr;
     onTrackLoaded = nullptr;
@@ -783,6 +1320,7 @@ TrackComponent::~TrackComponent()
     if (waveformDisplay)
     {
         waveformDisplay->onPositionChanged = nullptr;
+        waveformDisplay->onBPMChanged = nullptr;
     }
     
     audioTrack = nullptr;
@@ -790,7 +1328,6 @@ TrackComponent::~TrackComponent()
 
 juce::Colour TrackComponent::getTrackColour(int trackNumber)
 {
-    // 8 distinct colors for 8 tracks
     static const juce::Colour trackColours[8] = {
         juce::Colour(0xff0080ff),  // Blue
         juce::Colour(0xff00ff80),  // Green
@@ -833,6 +1370,13 @@ void TrackComponent::resized()
     
     waveformDisplay->setBounds(area.removeFromTop(80));
     
+    // Zoom controls below waveform
+    juce::Rectangle<int> zoomArea = area.removeFromTop(25);
+    zoomLabel.setBounds(zoomArea.removeFromLeft(40));
+    zoomOutButton.setBounds(zoomArea.removeFromLeft(25));
+    zoomArea.removeFromLeft(2);
+    zoomInButton.setBounds(zoomArea.removeFromLeft(25));
+    
     area.removeFromTop(5);
     
     juce::Rectangle<int> buttonArea = area.removeFromTop(30);
@@ -845,6 +1389,8 @@ void TrackComponent::resized()
     loopButton.setBounds(buttonArea.removeFromLeft(40));
     buttonArea.removeFromLeft(3);
     quantizeButton.setBounds(buttonArea.removeFromLeft(35));
+    buttonArea.removeFromLeft(3);
+    bpmEditButton.setBounds(buttonArea.removeFromLeft(35));
     
     area.removeFromTop(8);
     
@@ -859,6 +1405,113 @@ void TrackComponent::resized()
     stretchSlider.setBounds(stretchArea);
 }
 
+void TrackComponent::zoomInButtonClicked()
+{
+    currentZoom *= 1.5;
+    currentZoom = juce::jmin(currentZoom, 10.0);
+    
+    if (waveformDisplay)
+    {
+        waveformDisplay->setZoomFactor(currentZoom);
+    }
+    
+    juce::Logger::writeToLog("Track " + juce::String(trackNum + 1) + " zoom: " + juce::String(currentZoom, 1) + "x");
+}
+
+void TrackComponent::zoomOutButtonClicked()
+{
+    currentZoom /= 1.5;
+    currentZoom = juce::jmax(currentZoom, 0.1);
+    
+    if (waveformDisplay)
+    {
+        waveformDisplay->setZoomFactor(currentZoom);
+    }
+    
+    juce::Logger::writeToLog("Track " + juce::String(trackNum + 1) + " zoom: " + juce::String(currentZoom, 1) + "x");
+}
+
+void TrackComponent::onWaveformBPMChanged(double bpm)
+{
+    if (audioTrack)
+    {
+        audioTrack->setManualBPM(bpm);
+        updateTrackInfo();
+        
+        juce::Logger::writeToLog("Track " + juce::String(trackNum + 1) +
+                                " BPM manually adjusted to: " + juce::String(bpm, 1));
+        
+        if (onTrackLoaded)
+        {
+            onTrackLoaded(bpm);
+        }
+    }
+}
+
+void TrackComponent::bpmEditButtonClicked()
+{
+    if (audioTrack && audioTrack->isLoaded())
+    {
+        showBPMEditor();
+    }
+    else
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                             "No Audio Loaded",
+                                             "Load an audio file first to edit BPM.");
+    }
+}
+
+void TrackComponent::showBPMEditor()
+{
+    if (!audioTrack) return;
+    
+    double currentBPM = audioTrack->getDetectedBPM();
+    
+    juce::String message = "Current detected BPM: " + juce::String(currentBPM, 1) +
+                          "\n\nEnter the correct BPM for this track:" +
+                          "\n(You can also drag the grid lines on the waveform for fine adjustment)";
+    
+    auto* alertWindow = new juce::AlertWindow("Edit BPM",
+                                            message,
+                                            juce::AlertWindow::QuestionIcon);
+    
+    alertWindow->addTextEditor("bpmInput", juce::String(currentBPM, 1), "BPM:");
+    alertWindow->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    alertWindow->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    
+    alertWindow->enterModalState(true,
+        juce::ModalCallbackFunction::create([this, alertWindow](int result) {
+            if (result == 1)
+            {
+                juce::String bpmText = alertWindow->getTextEditorContents("bpmInput");
+                double newBPM = bpmText.getDoubleValue();
+                
+                if (newBPM >= 60.0 && newBPM <= 200.0)
+                {
+                    if (audioTrack)
+                    {
+                        audioTrack->setManualBPM(newBPM);
+                        updateTrackInfo();
+                        updateWaveform();
+                        
+                        if (onTrackLoaded)
+                        {
+                            onTrackLoaded(newBPM);
+                        }
+                    }
+                }
+                else
+                {
+                    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                         "Invalid BPM",
+                                                         "Please enter a BPM between 60 and 200.");
+                }
+            }
+            delete alertWindow;
+        }), true);
+}
+
 void TrackComponent::updateTrackInfo()
 {
     if (audioTrack && audioTrack->isLoaded())
@@ -869,7 +1522,6 @@ void TrackComponent::updateTrackInfo()
         if (bpm > 0.0)
         {
             bpmLabel.setText("BPM: " + juce::String(bpm, 1), juce::dontSendNotification);
-            // Update waveform with detected BPM for grid display
             waveformDisplay->setDetectedBPM(bpm);
         }
         else
@@ -927,14 +1579,11 @@ void TrackComponent::loadButtonClicked()
         {
             audioTrack->loadAudioFile(file);
             
-            // Notify parent about track loaded with detected BPM FIRST
-            // This will set Master BPM and adjust this track appropriately
             if (onTrackLoaded && audioTrack->getDetectedBPM() > 0.0)
             {
                 onTrackLoaded(audioTrack->getDetectedBPM());
             }
             
-            // THEN update UI
             updateTrackInfo();
             updateWaveform();
         }
@@ -996,7 +1645,6 @@ void TrackComponent::stretchSliderChanged()
 
 void TrackComponent::quantizeButtonClicked()
 {
-    // Cycle through quantize values: 4 -> 8 -> 16 -> 32 -> 4
     switch (currentQuantize)
     {
         case 4:  currentQuantize = 8;  break;
@@ -1247,7 +1895,7 @@ MainComponent::MainComponent()
     setupTransport();
     setupLayout();
     
-    setSize(1000, 800);
+    setSize(1200, 900);
     setAudioChannels(0, 2);
     
     startTimer(50);
@@ -1324,7 +1972,6 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
         }
     }
     
-    // Process metronome
     if (metronomeEnabled)
     {
         processMetronome(*bufferToFill.buffer, numSamples);
@@ -1344,7 +1991,8 @@ void MainComponent::paint(juce::Graphics& g)
     
     g.setColour(juce::Colours::white);
     g.setFont(juce::Font(16.0f, juce::Font::bold));
-    g.drawText("STRETCHER - Multitrack Audio Looper (SoundTouch Pitch-Preserving)", 10, 5, 650, 20, juce::Justification::left);
+    g.drawText("STRETCHER - Advanced Multitrack Audio Looper with Precision BPM Detection",
+               10, 5, 700, 20, juce::Justification::left);
 }
 
 void MainComponent::resized()
@@ -1357,12 +2005,12 @@ void MainComponent::resized()
     
     tracksViewport.setBounds(area);
     
-    int trackHeight = 220;
+    int trackHeight = 250;
     tracksContainer.setSize(getWidth(), maxTracks * trackHeight);
     
     for (int i = 0; i < maxTracks; ++i)
     {
-        trackComponents[i]->setBounds(0, i * trackHeight, getWidth() - 20, trackHeight - 5);
+        trackComponents[i]->setBounds(0, i * trackHeight, getWidth() - 20, trackHeight - 10);
     }
 }
 
@@ -1458,7 +2106,6 @@ void MainComponent::setTempo(double bpm)
     previousMasterTempo = masterTempo;
     masterTempo = bpm;
     
-    // Update metronome beat interval
     metronomeBeatInterval = 60.0 / bpm;
     
     for (auto& track : audioTracks)
@@ -1479,21 +2126,17 @@ void MainComponent::setInitialMasterBPM(double bpm, AudioTrack* definingTrack)
 {
     juce::ScopedLock sl(audioLock);
     
-    // Set Master BPM without affecting stretch ratios
     previousMasterTempo = masterTempo;
     masterTempo = bpm;
     
-    // Update metronome beat interval
     metronomeBeatInterval = 60.0 / bpm;
     
-    // Ensure the defining track stays at 1.0 stretch and is set to the new master BPM
     if (definingTrack)
     {
         definingTrack->setStretchRatio(1.0);
         definingTrack->setMasterBPM(bpm);
     }
     
-    // Update all tracks' master BPM (but don't change their stretch ratios)
     for (auto& track : audioTracks)
     {
         if (track && track.get() != definingTrack)
@@ -1502,7 +2145,6 @@ void MainComponent::setInitialMasterBPM(double bpm, AudioTrack* definingTrack)
         }
     }
     
-    // Update transport display
     if (transportComponent)
     {
         transportComponent->setTempo(bpm);
@@ -1594,7 +2236,6 @@ void MainComponent::toggleMetronome()
         transportComponent->setMetronomeEnabled(metronomeEnabled);
     }
     
-    // Reset metronome timing when toggled
     metronomePhase = 0.0;
     lastBeatTime = 0.0;
 }
@@ -1611,49 +2252,42 @@ void MainComponent::processMetronome(juce::AudioBuffer<float>& buffer, int numSa
     {
         double currentTime = currentPlayPosition + (sample / sampleRate);
         
-        // Check if we've hit a beat
         double timeSinceLastBeat = currentTime - lastBeatTime;
         if (timeSinceLastBeat >= metronomeBeatInterval)
         {
             lastBeatTime = currentTime;
-            metronomePhase = 0.0; // Reset phase for new click
+            metronomePhase = 0.0;
         }
         
-        // Generate click sound
         float clickSample = generateClickSound(metronomePhase);
         
-        // Add to both channels
         if (buffer.getNumChannels() >= 1)
             buffer.addSample(0, sample, clickSample * metronomeVolume);
         if (buffer.getNumChannels() >= 2)
             buffer.addSample(1, sample, clickSample * metronomeVolume);
         
-        // Update phase
         metronomePhase += 1.0 / sampleRate;
     }
 }
 
 float MainComponent::generateClickSound(double phase)
 {
-    // Generate a short, dry click sound
-    const double clickDuration = 0.01; // 10ms click
+    const double clickDuration = 0.01;
     
     if (phase > clickDuration)
         return 0.0f;
     
-    // Create a short sine wave burst with envelope
-    const double frequency = 2000.0; // 2kHz click frequency
-    double envelope = 1.0 - (phase / clickDuration); // Linear decay
-    envelope = envelope * envelope; // Square for sharper decay
+    const double frequency = 2000.0;
+    double envelope = 1.0 - (phase / clickDuration);
+    envelope = envelope * envelope;
     
     double sineWave = std::sin(2.0 * juce::MathConstants<double>::pi * frequency * phase);
     
-    return static_cast<float>(sineWave * envelope * 0.3); // Scale down volume
+    return static_cast<float>(sineWave * envelope * 0.3);
 }
 
 void MainComponent::onTrackLoaded(double trackBPM)
 {
-    // Count how many tracks have audio loaded and find the loaded track
     int tracksWithAudio = 0;
     AudioTrack* loadedTrack = nullptr;
     
@@ -1662,12 +2296,10 @@ void MainComponent::onTrackLoaded(double trackBPM)
         if (track && track->isLoaded())
         {
             tracksWithAudio++;
-            loadedTrack = track.get(); // This will be the most recently loaded track
+            loadedTrack = track.get();
         }
     }
     
-    // If this is the first track loaded in the session (only 1 track has audio),
-    // set Master BPM to track's BPM using the special method that preserves stretch factor 1.0
     if (tracksWithAudio == 1 && trackBPM > 0.0 && loadedTrack)
     {
         setInitialMasterBPM(trackBPM, loadedTrack);
@@ -1682,7 +2314,6 @@ void MainComponent::setupTracks()
         audioTracks[i]->setMasterBPM(masterTempo);
         trackComponents[i] = std::make_unique<TrackComponent>(audioTracks[i].get(), i);
         
-        // Set callback for when track loads audio
         trackComponents[i]->onTrackLoaded = [this](double bpm) { onTrackLoaded(bpm); };
         
         tracksContainer.addAndMakeVisible(trackComponents[i].get());

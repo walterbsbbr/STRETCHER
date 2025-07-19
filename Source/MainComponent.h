@@ -2,6 +2,9 @@
 
 #include <JuceHeader.h>
 #include <soundtouch/SoundTouch.h>
+#include <vector>
+#include <memory>
+#include <array>
 
 class WaveformComponent : public juce::Component
 {
@@ -12,6 +15,8 @@ public:
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
+    void mouseMove(const juce::MouseEvent& event) override;
+    void mouseExit(const juce::MouseEvent& event) override;
     
     void setWaveformData(const std::vector<float>& peaks, double sampleRate, int totalSamples);
     void setPlayPosition(double positionInSeconds);
@@ -20,8 +25,13 @@ public:
     void setDetectedBPM(double bpm);
     void setWaveformColour(const juce::Colour& colour);
     void setQuantizeValue(int quantizeValue);
+    void setZoomFactor(double zoom);
+    
+    double getZoomFactor() const { return zoomFactor; }
+    double getDetectedBPM() const { return detectedBPM; }
     
     std::function<void(double)> onPositionChanged;
+    std::function<void(double)> onBPMChanged;
 
 private:
     std::vector<float> waveformPeaks;
@@ -33,10 +43,26 @@ private:
     double detectedBPM;
     juce::Colour waveformColour;
     int quantizeDivisions;
+    double zoomFactor;
+    double viewStartTime;  // For zoom - what time we're viewing from
+    
+    // Grid dragging for BPM adjustment
+    std::vector<double> gridPositions;
+    int draggedGridIndex;
+    bool isDraggingGrid;
+    double initialMouseX;
+    double initialGridTime;
+    juce::MouseCursor currentCursor;
     
     void updatePositionFromMouse(const juce::MouseEvent& event);
     void drawGrid(juce::Graphics& g, const juce::Rectangle<int>& area);
     void drawBeatLines(juce::Graphics& g, const juce::Rectangle<int>& area);
+    void initializeGridPositions();
+    int findGridLineAtPosition(int mouseX, const juce::Rectangle<int>& area);
+    void updateBPMFromGrid();
+    void updateCursor(const juce::MouseEvent& event);
+    double timeToPixel(double timeInSeconds, const juce::Rectangle<int>& area) const;
+    double pixelToTime(int pixelX, const juce::Rectangle<int>& area) const;
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
 };
@@ -53,6 +79,7 @@ public:
     void setPosition(double positionInSeconds);
     void reset();
     void setMasterBPM(double masterBPM);
+    void setManualBPM(double bpm);
     
     void processBlock(juce::AudioBuffer<float>& buffer, int startSample, int numSamples);
     
@@ -96,7 +123,14 @@ private:
     
     juce::CriticalSection lock;
     
-    double detectBPM();
+    // Improved BPM detection methods
+    double detectBPMImproved();
+    double detectBPMAutocorrelation();
+    std::vector<double> calculateBeatTrack();
+    double detectBPMFromOnsets();
+    std::vector<float> calculateOnsetStrength();
+    double findBestBPMCandidate(const std::vector<double>& onsetTimes);
+    
     void generateWaveformPeaks();
     void processDirectPlayback(juce::AudioBuffer<float>& buffer, int startSample, int numSamples);
     void processWithSoundTouch(juce::AudioBuffer<float>& buffer, int startSample, int numSamples);
@@ -129,6 +163,9 @@ private:
     juce::TextButton soloButton;
     juce::TextButton loopButton;
     juce::TextButton quantizeButton;
+    juce::TextButton bpmEditButton;
+    juce::TextButton zoomInButton;
+    juce::TextButton zoomOutButton;
     juce::Slider volumeSlider;
     juce::Slider stretchSlider;
     juce::Label trackLabel;
@@ -136,17 +173,25 @@ private:
     juce::Label bpmLabel;
     juce::Label stretchLabel;
     juce::Label volumeLabel;
+    juce::Label zoomLabel;
     
     int currentQuantize;
+    bool editingBPM;
+    double currentZoom;
     
     void loadButtonClicked();
     void muteButtonClicked();
     void soloButtonClicked();
     void loopButtonClicked();
     void quantizeButtonClicked();
+    void bpmEditButtonClicked();
+    void zoomInButtonClicked();
+    void zoomOutButtonClicked();
     void volumeSliderChanged();
     void stretchSliderChanged();
     void onWaveformPositionChanged(double position);
+    void onWaveformBPMChanged(double bpm);
+    void showBPMEditor();
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackComponent)
 };
