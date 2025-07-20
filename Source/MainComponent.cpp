@@ -21,7 +21,18 @@ WaveformComponent::WaveformComponent()
       isDraggingGrid(false),
       initialMouseX(0.0),
       initialGridTime(0.0),
-      currentCursor(juce::MouseCursor::NormalCursor)
+      currentCursor(juce::MouseCursor::NormalCursor),
+      isDraggingWaveform(false),
+      initialViewStartTime(0.0),
+      panStartX(0),
+      isSelecting(false),
+      hasSelection(false),
+      selectionStart(0.0),
+      selectionEnd(0.0),
+      selectionStartX(0.0),
+      isResizingSelectionStart(false),
+      isResizingSelectionEnd(false),
+      fixedSelectionBound(0.0)
 {
     setMouseCursor(juce::MouseCursor::NormalCursor);
 }
@@ -127,6 +138,50 @@ void WaveformComponent::paint(juce::Graphics& g)
     // Draw beat lines on top of waveform
     drawBeatLines(g, area);
     
+    // Draw selection region
+    if (hasSelection && selectionEnd > selectionStart)
+    {
+        int selStartX = (int)timeToPixel(selectionStart, area);
+        int selEndX = (int)timeToPixel(selectionEnd, area);
+        
+        if (selStartX >= 0 && selEndX >= 0)
+        {
+            // Draw selection background
+            g.setColour(juce::Colours::yellow.withAlpha(0.2f));
+            g.fillRect(selStartX, area.getY(), selEndX - selStartX, area.getHeight());
+            
+            // Draw selection borders
+            g.setColour(juce::Colours::yellow.withAlpha(0.8f));
+            g.drawVerticalLine(selStartX, area.getY(), area.getBottom());
+            g.drawVerticalLine(selEndX, area.getY(), area.getBottom());
+            
+            // Draw resize handles on borders
+            g.setColour(juce::Colours::orange.withAlpha(0.9f));
+            const int handleSize = 8;
+            const int handleHeight = 24;
+            int centerY = area.getCentreY();
+            
+            // Start handle (with border)
+            g.fillRect(selStartX - handleSize/2, centerY - handleHeight/2, handleSize, handleHeight);
+            g.setColour(juce::Colours::darkorange);
+            g.drawRect(selStartX - handleSize/2, centerY - handleHeight/2, handleSize, handleHeight, 1);
+            
+            // End handle (with border)
+            g.setColour(juce::Colours::orange.withAlpha(0.9f));
+            g.fillRect(selEndX - handleSize/2, centerY - handleHeight/2, handleSize, handleHeight);
+            g.setColour(juce::Colours::darkorange);
+            g.drawRect(selEndX - handleSize/2, centerY - handleHeight/2, handleSize, handleHeight, 1);
+            
+            // Draw selection info
+            g.setColour(juce::Colours::yellow);
+            g.setFont(9.0f);
+            double selDuration = selectionEnd - selectionStart;
+            juce::String selInfo = "Loop: " + juce::String(selDuration, 2) + "s (" +
+                                  juce::String(selectionStart, 1) + "s - " + juce::String(selectionEnd, 1) + "s)";
+            g.drawText(selInfo, selStartX + 2, area.getY() + 2, 150, 12, juce::Justification::left);
+        }
+    }
+    
     // Draw playback position
     if (totalDuration > 0.0)
     {
@@ -145,8 +200,22 @@ void WaveformComponent::paint(juce::Graphics& g)
     // Draw loop indicator
     if (isLooping)
     {
-        g.setColour(juce::Colours::green.withAlpha(0.3f));
-        g.fillRect(area.getX(), area.getBottom() - 3, area.getWidth(), 3);
+        if (hasSelection && selectionEnd > selectionStart)
+        {
+            // Show that we're looping only the selected region
+            g.setColour(juce::Colours::orange.withAlpha(0.6f));
+            g.fillRect(area.getX(), area.getBottom() - 4, area.getWidth(), 4);
+            
+            g.setColour(juce::Colours::orange);
+            g.setFont(8.0f);
+            g.drawText("LOOP REGION", area.getX() + 2, area.getBottom() - 14, 70, 10, juce::Justification::left);
+        }
+        else
+        {
+            // Show that we're looping the full track
+            g.setColour(juce::Colours::green.withAlpha(0.3f));
+            g.fillRect(area.getX(), area.getBottom() - 3, area.getWidth(), 3);
+        }
     }
     
     // Draw zoom info
@@ -154,8 +223,55 @@ void WaveformComponent::paint(juce::Graphics& g)
     {
         g.setColour(juce::Colours::cyan.withAlpha(0.8f));
         g.setFont(10.0f);
-        g.drawText("Zoom: " + juce::String(zoomFactor, 1) + "x",
-                  area.getX() + 5, area.getY() + 5, 80, 15, juce::Justification::left);
+        
+        double visibleDuration = totalDuration / zoomFactor;
+        double endTime = juce::jmin(viewStartTime + visibleDuration, totalDuration);
+        
+        juce::String zoomInfo = "Zoom: " + juce::String(zoomFactor, 1) + "x | " +
+                               "View: " + juce::String(viewStartTime, 1) + "s - " + juce::String(endTime, 1) + "s";
+        
+        if (hasSelection)
+        {
+            zoomInfo += " | Shift+drag edges to resize";
+        }
+        else
+        {
+            zoomInfo += " | Shift+drag to select";
+        }
+        
+        g.drawText(zoomInfo, area.getX() + 5, area.getY() + 5, 350, 15, juce::Justification::left);
+        
+        // Draw scroll indicator
+        if (totalDuration > 0.0)
+        {
+            double scrollPercent = viewStartTime / (totalDuration - visibleDuration);
+            scrollPercent = juce::jlimit(0.0, 1.0, scrollPercent);
+            
+            int scrollBarWidth = 60;
+            int scrollBarX = area.getRight() - scrollBarWidth - 5;
+            int scrollBarY = area.getY() + 5;
+            
+            g.setColour(juce::Colours::darkgrey.withAlpha(0.5f));
+            g.fillRect(scrollBarX, scrollBarY, scrollBarWidth, 4);
+            
+            g.setColour(juce::Colours::cyan.withAlpha(0.8f));
+            int thumbPos = (int)(scrollPercent * (scrollBarWidth - 10));
+            g.fillRect(scrollBarX + thumbPos, scrollBarY, 10, 4);
+        }
+    }
+    else if (!waveformPeaks.empty())
+    {
+        // Show selection instructions when not zoomed
+        g.setColour(juce::Colours::grey.withAlpha(0.6f));
+        g.setFont(10.0f);
+        if (hasSelection)
+        {
+            g.drawText("Shift+drag edges to resize selection", area.getX() + 5, area.getBottom() - 15, 180, 12, juce::Justification::left);
+        }
+        else
+        {
+            g.drawText("Shift+drag to select loop region", area.getX() + 5, area.getBottom() - 15, 150, 12, juce::Justification::left);
+        }
     }
 }
 
@@ -307,6 +423,25 @@ void WaveformComponent::updateCursor(const juce::MouseEvent& event)
     {
         setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
     }
+    else if (event.mods.isShiftDown())
+    {
+        // Check if near selection edges when shift is down
+        if (hasSelection)
+        {
+            bool nearStart = false, nearEnd = false;
+            if (isNearSelectionEdge(event.x, area, nearStart, nearEnd))
+            {
+                // Use different cursor for selection edges to differentiate from grid resize
+                setMouseCursor(juce::MouseCursor::UpDownLeftRightResizeCursor);
+                return;
+            }
+        }
+        setMouseCursor(juce::MouseCursor::CrosshairCursor);
+    }
+    else if (zoomFactor > 1.01) // When zoomed in, show pan cursor
+    {
+        setMouseCursor(juce::MouseCursor::DraggingHandCursor);
+    }
     else
     {
         setMouseCursor(juce::MouseCursor::NormalCursor);
@@ -351,7 +486,12 @@ void WaveformComponent::mouseDown(const juce::MouseEvent& event)
     
     if (gridIndex >= 0)
     {
+        // Grid line dragging for BPM adjustment
         isDraggingGrid = true;
+        isDraggingWaveform = false;
+        isSelecting = false;
+        isResizingSelectionStart = false;
+        isResizingSelectionEnd = false;
         draggedGridIndex = gridIndex;
         initialMouseX = event.x;
         
@@ -360,9 +500,67 @@ void WaveformComponent::mouseDown(const juce::MouseEvent& event)
             initialGridTime = gridPositions[gridIndex];
         }
     }
+    else if (event.mods.isShiftDown())
+    {
+        // Check if clicking near selection edges for resizing
+        if (hasSelection)
+        {
+            bool nearStart = false, nearEnd = false;
+            if (isNearSelectionEdge(event.x, area, nearStart, nearEnd))
+            {
+                // Start resizing selection edge
+                isDraggingGrid = false;
+                isDraggingWaveform = false;
+                isSelecting = false;
+                
+                if (nearStart)
+                {
+                    isResizingSelectionStart = true;
+                    isResizingSelectionEnd = false;
+                    fixedSelectionBound = selectionEnd; // Keep end fixed
+                }
+                else if (nearEnd)
+                {
+                    isResizingSelectionStart = false;
+                    isResizingSelectionEnd = true;
+                    fixedSelectionBound = selectionStart; // Keep start fixed
+                }
+                return;
+            }
+        }
+        
+        // Start new selection with Shift+drag
+        isSelecting = true;
+        isDraggingGrid = false;
+        isDraggingWaveform = false;
+        isResizingSelectionStart = false;
+        isResizingSelectionEnd = false;
+        
+        double startTime = pixelToTime(event.x, area);
+        selectionStart = juce::jlimit(0.0, totalDuration, startTime);
+        selectionEnd = selectionStart;
+        selectionStartX = event.x;
+        hasSelection = false; // Will become true when drag starts
+    }
+    else if (zoomFactor > 1.01)
+    {
+        // Waveform panning when zoomed in
+        isDraggingWaveform = true;
+        isDraggingGrid = false;
+        isSelecting = false;
+        isResizingSelectionStart = false;
+        isResizingSelectionEnd = false;
+        panStartX = event.x;
+        initialViewStartTime = viewStartTime;
+    }
     else
     {
-        // Normal position update
+        // Normal position update when not zoomed
+        isDraggingGrid = false;
+        isDraggingWaveform = false;
+        isSelecting = false;
+        isResizingSelectionStart = false;
+        isResizingSelectionEnd = false;
         updatePositionFromMouse(event);
     }
 }
@@ -371,9 +569,9 @@ void WaveformComponent::mouseDrag(const juce::MouseEvent& event)
 {
     if (isDraggingGrid && draggedGridIndex >= 0)
     {
+        // Grid line dragging for BPM adjustment
         juce::Rectangle<int> area = getLocalBounds().reduced(2);
         
-        // Update grid position based on drag
         double newTime = pixelToTime(event.x, area);
         newTime = juce::jlimit(0.0, totalDuration, newTime);
         
@@ -383,8 +581,106 @@ void WaveformComponent::mouseDrag(const juce::MouseEvent& event)
             updateBPMFromGrid();
         }
     }
-    else
+    else if (isResizingSelectionStart)
     {
+        // Resize selection start edge
+        juce::Rectangle<int> area = getLocalBounds().reduced(2);
+        
+        double newStartTime = pixelToTime(event.x, area);
+        newStartTime = juce::jlimit(0.0, totalDuration, newStartTime);
+        
+        // Ensure start doesn't go past the fixed end
+        if (newStartTime < fixedSelectionBound)
+        {
+            selectionStart = newStartTime;
+            selectionEnd = fixedSelectionBound;
+        }
+        else
+        {
+            // If dragged past end, swap them
+            selectionStart = fixedSelectionBound;
+            selectionEnd = newStartTime;
+            // Switch to resizing end instead
+            isResizingSelectionStart = false;
+            isResizingSelectionEnd = true;
+            fixedSelectionBound = selectionStart;
+        }
+        
+        hasSelection = (std::abs(selectionEnd - selectionStart) > 0.01);
+        repaint();
+    }
+    else if (isResizingSelectionEnd)
+    {
+        // Resize selection end edge
+        juce::Rectangle<int> area = getLocalBounds().reduced(2);
+        
+        double newEndTime = pixelToTime(event.x, area);
+        newEndTime = juce::jlimit(0.0, totalDuration, newEndTime);
+        
+        // Ensure end doesn't go before the fixed start
+        if (newEndTime > fixedSelectionBound)
+        {
+            selectionStart = fixedSelectionBound;
+            selectionEnd = newEndTime;
+        }
+        else
+        {
+            // If dragged past start, swap them
+            selectionStart = newEndTime;
+            selectionEnd = fixedSelectionBound;
+            // Switch to resizing start instead
+            isResizingSelectionStart = true;
+            isResizingSelectionEnd = false;
+            fixedSelectionBound = selectionEnd;
+        }
+        
+        hasSelection = (std::abs(selectionEnd - selectionStart) > 0.01);
+        repaint();
+    }
+    else if (isSelecting)
+    {
+        // Selection dragging (new selection)
+        juce::Rectangle<int> area = getLocalBounds().reduced(2);
+        
+        double endTime = pixelToTime(event.x, area);
+        endTime = juce::jlimit(0.0, totalDuration, endTime);
+        
+        // Ensure selection start is always less than end
+        if (endTime < selectionStart)
+        {
+            selectionEnd = selectionStart;
+            selectionStart = endTime;
+        }
+        else
+        {
+            selectionEnd = endTime;
+        }
+        
+        hasSelection = (std::abs(selectionEnd - selectionStart) > 0.01); // Minimum 10ms selection
+        repaint();
+    }
+    else if (isDraggingWaveform && zoomFactor > 1.01)
+    {
+        // Waveform panning when zoomed in
+        juce::Rectangle<int> area = getLocalBounds().reduced(2);
+        
+        int deltaX = event.x - panStartX;
+        double visibleDuration = totalDuration / zoomFactor;
+        
+        // Convert pixel movement to time movement
+        double timeDelta = -(deltaX / (double)area.getWidth()) * visibleDuration;
+        
+        viewStartTime = initialViewStartTime + timeDelta;
+        
+        // Constrain view to valid range
+        double maxViewStart = juce::jmax(0.0, totalDuration - visibleDuration);
+        viewStartTime = juce::jlimit(0.0, maxViewStart, viewStartTime);
+        
+        repaint();
+    }
+    else if (!isDraggingGrid && !isDraggingWaveform && !isSelecting && !isResizingSelectionStart && !isResizingSelectionEnd)
+    {
+        // Normal position update
         updatePositionFromMouse(event);
     }
 }
@@ -394,17 +690,51 @@ void WaveformComponent::mouseMove(const juce::MouseEvent& event)
     updateCursor(event);
 }
 
+void WaveformComponent::mouseUp(const juce::MouseEvent& event)
+{
+    juce::ignoreUnused(event);
+    
+    if ((isSelecting || isResizingSelectionStart || isResizingSelectionEnd) && hasSelection)
+    {
+        // Finalize selection and notify callback
+        if (onSelectionChanged && selectionEnd > selectionStart)
+        {
+            onSelectionChanged(selectionStart, selectionEnd);
+            
+            // Log what happened
+            if (isResizingSelectionStart || isResizingSelectionEnd)
+            {
+                juce::Logger::writeToLog("Selection resized to: " +
+                                        juce::String(selectionStart, 2) + "s - " +
+                                        juce::String(selectionEnd, 2) + "s");
+            }
+        }
+    }
+    
+    // Reset all drag states
+    isDraggingGrid = false;
+    isDraggingWaveform = false;
+    isSelecting = false;
+    isResizingSelectionStart = false;
+    isResizingSelectionEnd = false;
+    draggedGridIndex = -1;
+}
+
 void WaveformComponent::mouseExit(const juce::MouseEvent& event)
 {
     juce::ignoreUnused(event);
     isDraggingGrid = false;
+    isDraggingWaveform = false;
+    isSelecting = false;
+    isResizingSelectionStart = false;
+    isResizingSelectionEnd = false;
     draggedGridIndex = -1;
     setMouseCursor(juce::MouseCursor::NormalCursor);
 }
 
 void WaveformComponent::updatePositionFromMouse(const juce::MouseEvent& event)
 {
-    if (totalDuration <= 0.0 || isDraggingGrid)
+    if (totalDuration <= 0.0 || isDraggingGrid || isDraggingWaveform || isSelecting || isResizingSelectionStart || isResizingSelectionEnd)
         return;
     
     juce::Rectangle<int> area = getLocalBounds().reduced(2);
@@ -419,6 +749,41 @@ void WaveformComponent::updatePositionFromMouse(const juce::MouseEvent& event)
     repaint();
 }
 
+void WaveformComponent::setSelectionRange(double startTime, double endTime)
+{
+    if (startTime >= 0.0 && endTime > startTime && endTime <= totalDuration)
+    {
+        selectionStart = startTime;
+        selectionEnd = endTime;
+        hasSelection = true;
+        repaint();
+    }
+}
+
+void WaveformComponent::clearSelection()
+{
+    hasSelection = false;
+    selectionStart = 0.0;
+    selectionEnd = 0.0;
+    repaint();
+}
+
+bool WaveformComponent::isNearSelectionEdge(int mouseX, const juce::Rectangle<int>& area, bool& nearStart, bool& nearEnd)
+{
+    if (!hasSelection)
+        return false;
+    
+    int startX = (int)timeToPixel(selectionStart, area);
+    int endX = (int)timeToPixel(selectionEnd, area);
+    
+    const int tolerance = 10; // pixels - increased for easier selection
+    
+    nearStart = (startX >= 0) && (std::abs(mouseX - startX) <= tolerance);
+    nearEnd = (endX >= 0) && (std::abs(mouseX - endX) <= tolerance);
+    
+    return nearStart || nearEnd;
+}
+
 void WaveformComponent::setWaveformData(const std::vector<float>& peaks, double sr, int samples)
 {
     waveformPeaks = peaks;
@@ -426,6 +791,12 @@ void WaveformComponent::setWaveformData(const std::vector<float>& peaks, double 
     totalSamples = samples;
     totalDuration = samples / sr;
     viewStartTime = 0.0;
+    zoomFactor = 1.0; // Reset zoom when loading new data
+    hasSelection = false; // Clear any existing selection
+    selectionStart = 0.0;
+    selectionEnd = 0.0;
+    isResizingSelectionStart = false;
+    isResizingSelectionEnd = false;
     initializeGridPositions();
     repaint();
 }
@@ -485,7 +856,7 @@ void WaveformComponent::setQuantizeValue(int quantizeValue)
 
 void WaveformComponent::setZoomFactor(double zoom)
 {
-    double newZoom = juce::jlimit(0.1, 10.0, zoom);
+    double newZoom = juce::jlimit(0.1, 20.0, zoom);
     
     if (std::abs(zoomFactor - newZoom) > 0.01)
     {
@@ -496,8 +867,17 @@ void WaveformComponent::setZoomFactor(double zoom)
         zoomFactor = newZoom;
         
         double newVisibleDuration = totalDuration / zoomFactor;
-        viewStartTime = centerTime - newVisibleDuration * 0.5;
-        viewStartTime = juce::jlimit(0.0, totalDuration - newVisibleDuration, viewStartTime);
+        
+        // Prevent division by zero or invalid duration
+        if (newVisibleDuration > 0.0 && totalDuration > 0.0)
+        {
+            viewStartTime = centerTime - newVisibleDuration * 0.5;
+            viewStartTime = juce::jlimit(0.0, juce::jmax(0.0, totalDuration - newVisibleDuration), viewStartTime);
+        }
+        else
+        {
+            viewStartTime = 0.0;
+        }
         
         repaint();
     }
@@ -516,7 +896,10 @@ AudioTrack::AudioTrack()
       muted(false),
       solo(false),
       looping(true),
-      volume(1.0f)
+      volume(1.0f),
+      hasCustomLoopRegion(false),
+      loopStartTime(0.0),
+      loopEndTime(0.0)
 {
     formatManager.registerBasicFormats();
     soundTouch = std::make_unique<soundtouch::SoundTouch>();
@@ -550,6 +933,11 @@ void AudioTrack::loadAudioFile(const juce::File& file)
         fileName = file.getFileNameWithoutExtension();
         currentPosition = 0.0;
         stretchRatio = 1.0;
+        
+        // Clear any existing loop region when loading new file
+        hasCustomLoopRegion = false;
+        loopStartTime = 0.0;
+        loopEndTime = 0.0;
         
         generateWaveformPeaks();
         
@@ -1013,13 +1401,32 @@ void AudioTrack::scaleStretchRatio(double scaleFactor)
 void AudioTrack::setPosition(double positionInSeconds)
 {
     juce::ScopedLock sl(lock);
-    currentPosition = positionInSeconds;
+    
+    // If there's a custom loop region, constrain position within it
+    if (hasCustomLoopRegion && loopEndTime > loopStartTime)
+    {
+        currentPosition = juce::jlimit(loopStartTime, loopEndTime, positionInSeconds);
+    }
+    else
+    {
+        currentPosition = juce::jlimit(0.0, getDurationInSeconds(), positionInSeconds);
+    }
 }
 
 void AudioTrack::reset()
 {
     juce::ScopedLock sl(lock);
-    currentPosition = 0.0;
+    
+    // Reset to loop start if there's a custom loop region, otherwise to beginning
+    if (hasCustomLoopRegion && loopStartTime >= 0.0)
+    {
+        currentPosition = loopStartTime;
+    }
+    else
+    {
+        currentPosition = 0.0;
+    }
+    
     if (soundTouch)
         soundTouch->clear();
 }
@@ -1066,19 +1473,45 @@ void AudioTrack::processDirectPlayback(juce::AudioBuffer<float>& buffer, int sta
     const int totalSamples = audioBuffer.getNumSamples();
     const int channelsToProcess = juce::jmin(outputChannels, inputChannels);
     
+    // Determine loop bounds
+    double loopStart = 0.0;
+    double loopEnd = getDurationInSeconds();
+    
+    if (hasCustomLoopRegion && loopEndTime > loopStartTime)
+    {
+        loopStart = loopStartTime;
+        loopEnd = loopEndTime;
+    }
+    
+    int loopStartSample = (int)(loopStart * sampleRate);
+    int loopEndSample = juce::jmin((int)(loopEnd * sampleRate), totalSamples);
+    int loopLengthSamples = loopEndSample - loopStartSample;
+    
+    if (loopLengthSamples <= 0)
+        return;
+    
     int currentSample = static_cast<int>(currentPosition * sampleRate);
     
-    if (looping && currentSample >= totalSamples)
+    // Handle looping within the defined region
+    if (looping)
     {
-        currentSample = currentSample % totalSamples;
-        currentPosition = currentSample / sampleRate;
+        if (currentSample < loopStartSample)
+        {
+            currentSample = loopStartSample;
+            currentPosition = loopStart;
+        }
+        else if (currentSample >= loopEndSample)
+        {
+            currentSample = loopStartSample + ((currentSample - loopStartSample) % loopLengthSamples);
+            currentPosition = currentSample / sampleRate;
+        }
     }
-    else if (currentSample >= totalSamples)
+    else if (currentSample >= loopEndSample)
     {
-        return;
+        return; // Stop at end of loop region when not looping
     }
     
-    int samplesToRead = juce::jmin(numSamples, totalSamples - currentSample);
+    int samplesToRead = juce::jmin(numSamples, loopEndSample - currentSample);
     if (samplesToRead <= 0)
         return;
     
@@ -1094,9 +1527,10 @@ void AudioTrack::processDirectPlayback(juce::AudioBuffer<float>& buffer, int sta
     
     currentPosition += (double)samplesToRead / sampleRate;
     
-    if (looping && currentPosition * sampleRate >= totalSamples)
+    // Loop back to start when reaching end of loop region
+    if (looping && currentPosition >= loopEnd)
     {
-        currentPosition = 0.0;
+        currentPosition = loopStart;
     }
 }
 
@@ -1112,20 +1546,47 @@ void AudioTrack::processWithSoundTouch(juce::AudioBuffer<float>& buffer, int sta
     
     soundTouch->setTempo(stretchRatio);
     
+    // Determine loop bounds
+    double loopStart = 0.0;
+    double loopEnd = getDurationInSeconds();
+    
+    if (hasCustomLoopRegion && loopEndTime > loopStartTime)
+    {
+        loopStart = loopStartTime;
+        loopEnd = loopEndTime;
+    }
+    
+    int loopStartSample = (int)(loopStart * sampleRate);
+    int loopEndSample = juce::jmin((int)(loopEnd * sampleRate), totalSamples);
+    int loopLengthSamples = loopEndSample - loopStartSample;
+    
+    if (loopLengthSamples <= 0)
+        return;
+    
     int currentSample = static_cast<int>(currentPosition * sampleRate);
     
-    if (looping && currentSample >= totalSamples)
+    // Handle looping within the defined region
+    if (looping)
     {
-        currentSample = currentSample % totalSamples;
-        currentPosition = currentSample / sampleRate;
-        soundTouch->clear();
+        if (currentSample < loopStartSample)
+        {
+            currentSample = loopStartSample;
+            currentPosition = loopStart;
+            soundTouch->clear();
+        }
+        else if (currentSample >= loopEndSample)
+        {
+            currentSample = loopStartSample + ((currentSample - loopStartSample) % loopLengthSamples);
+            currentPosition = currentSample / sampleRate;
+            soundTouch->clear();
+        }
     }
-    else if (currentSample >= totalSamples)
+    else if (currentSample >= loopEndSample)
     {
-        return;
+        return; // Stop at end of loop region when not looping
     }
     
-    int samplesToRead = juce::jmin(numSamples * 2, totalSamples - currentSample);
+    int samplesToRead = juce::jmin(numSamples * 2, loopEndSample - currentSample);
     if (samplesToRead <= 0)
         return;
     
@@ -1194,9 +1655,11 @@ void AudioTrack::processWithSoundTouch(juce::AudioBuffer<float>& buffer, int sta
     
     currentPosition += (double)samplesToRead / sampleRate;
     
-    if (looping && currentPosition * sampleRate >= totalSamples)
+    // Loop back to start when reaching end of loop region
+    if (looping && currentPosition >= loopEnd)
     {
-        currentPosition = 0.0;
+        currentPosition = loopStart;
+        soundTouch->clear(); // Clear SoundTouch buffer when looping
     }
 }
 
@@ -1205,6 +1668,43 @@ double AudioTrack::getDurationInSeconds() const
     if (audioBuffer.getNumSamples() > 0 && sampleRate > 0)
         return audioBuffer.getNumSamples() / sampleRate;
     return 0.0;
+}
+
+void AudioTrack::setLoopRegion(double startTime, double endTime)
+{
+    juce::ScopedLock sl(lock);
+    
+    if (startTime >= 0.0 && endTime > startTime && endTime <= getDurationInSeconds())
+    {
+        loopStartTime = startTime;
+        loopEndTime = endTime;
+        hasCustomLoopRegion = true;
+        
+        // Set position to loop start if currently outside the loop region
+        if (currentPosition < loopStartTime || currentPosition > loopEndTime)
+        {
+            currentPosition = loopStartTime;
+        }
+        
+        juce::Logger::writeToLog("Loop region set: " + juce::String(startTime, 2) + "s - " + juce::String(endTime, 2) + "s | Duration: " + juce::String(endTime - startTime, 2) + "s");
+    }
+}
+
+void AudioTrack::clearLoopRegion()
+{
+    juce::ScopedLock sl(lock);
+    
+    hasCustomLoopRegion = false;
+    loopStartTime = 0.0;
+    loopEndTime = 0.0;
+    
+    // Reset position to beginning of full track if we were inside a custom loop
+    if (currentPosition > getDurationInSeconds())
+    {
+        currentPosition = 0.0;
+    }
+    
+    juce::Logger::writeToLog("Loop region cleared - now looping full track (" + juce::String(getDurationInSeconds(), 1) + "s)");
 }
 
 // ============================================================================
@@ -1222,6 +1722,7 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
       bpmEditButton("Edit"),
       zoomInButton("+"),
       zoomOutButton("-"),
+      clearSelectionButton("Clear"),
       volumeSlider(juce::Slider::LinearHorizontal, juce::Slider::NoTextBox),
       stretchSlider(juce::Slider::LinearHorizontal, juce::Slider::NoTextBox),
       trackLabel("trackLabel", "Track " + juce::String(trackNumber + 1)),
@@ -1248,6 +1749,7 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
     addAndMakeVisible(bpmEditButton);
     addAndMakeVisible(zoomInButton);
     addAndMakeVisible(zoomOutButton);
+    addAndMakeVisible(clearSelectionButton);
     addAndMakeVisible(volumeSlider);
     addAndMakeVisible(stretchSlider);
     addAndMakeVisible(trackLabel);
@@ -1265,6 +1767,7 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
     bpmEditButton.onClick = [this] { bpmEditButtonClicked(); };
     zoomInButton.onClick = [this] { zoomInButtonClicked(); };
     zoomOutButton.onClick = [this] { zoomOutButtonClicked(); };
+    clearSelectionButton.onClick = [this] { clearSelectionButtonClicked(); };
     
     volumeSlider.setRange(0.0, 1.0, 0.01);
     volumeSlider.setValue(1.0);
@@ -1276,6 +1779,7 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
     
     waveformDisplay->onPositionChanged = [this](double position) { onWaveformPositionChanged(position); };
     waveformDisplay->onBPMChanged = [this](double bpm) { onWaveformBPMChanged(bpm); };
+    waveformDisplay->onSelectionChanged = [this](double start, double end) { onWaveformSelectionChanged(start, end); };
     
     muteButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
     soloButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
@@ -1284,6 +1788,7 @@ TrackComponent::TrackComponent(AudioTrack* track, int trackNumber)
     bpmEditButton.setColour(juce::TextButton::buttonColourId, juce::Colours::orange.darker());
     zoomInButton.setColour(juce::TextButton::buttonColourId, juce::Colours::blue.darker());
     zoomOutButton.setColour(juce::TextButton::buttonColourId, juce::Colours::blue.darker());
+    clearSelectionButton.setColour(juce::TextButton::buttonColourId, juce::Colours::red.darker());
     
     trackLabel.setFont(juce::Font(14.0f, juce::Font::bold));
     fileLabel.setFont(juce::Font(12.0f));
@@ -1313,6 +1818,7 @@ TrackComponent::~TrackComponent()
     bpmEditButton.onClick = nullptr;
     zoomInButton.onClick = nullptr;
     zoomOutButton.onClick = nullptr;
+    clearSelectionButton.onClick = nullptr;
     volumeSlider.onValueChange = nullptr;
     stretchSlider.onValueChange = nullptr;
     onTrackLoaded = nullptr;
@@ -1321,6 +1827,7 @@ TrackComponent::~TrackComponent()
     {
         waveformDisplay->onPositionChanged = nullptr;
         waveformDisplay->onBPMChanged = nullptr;
+        waveformDisplay->onSelectionChanged = nullptr;
     }
     
     audioTrack = nullptr;
@@ -1376,6 +1883,8 @@ void TrackComponent::resized()
     zoomOutButton.setBounds(zoomArea.removeFromLeft(25));
     zoomArea.removeFromLeft(2);
     zoomInButton.setBounds(zoomArea.removeFromLeft(25));
+    zoomArea.removeFromLeft(5);
+    clearSelectionButton.setBounds(zoomArea.removeFromLeft(40));
     
     area.removeFromTop(5);
     
@@ -1407,28 +1916,44 @@ void TrackComponent::resized()
 
 void TrackComponent::zoomInButtonClicked()
 {
-    currentZoom *= 1.5;
-    currentZoom = juce::jmin(currentZoom, 10.0);
+    currentZoom = juce::jlimit(0.1, 20.0, currentZoom * 1.5);
     
     if (waveformDisplay)
     {
         waveformDisplay->setZoomFactor(currentZoom);
     }
     
-    juce::Logger::writeToLog("Track " + juce::String(trackNum + 1) + " zoom: " + juce::String(currentZoom, 1) + "x");
+    juce::Logger::writeToLog("Track " + juce::String(trackNum + 1) + " zoom: " + juce::String(currentZoom, 1) + "x" +
+                            (currentZoom > 1.01 ? " (drag waveform to pan)" : ""));
+}
+
+void TrackComponent::clearSelectionButtonClicked()
+{
+    if (waveformDisplay)
+    {
+        waveformDisplay->clearSelection();
+    }
+    
+    if (audioTrack)
+    {
+        audioTrack->clearLoopRegion();
+    }
+    
+    juce::Logger::writeToLog("Track " + juce::String(trackNum + 1) +
+                            " selection cleared - now looping full track instead of region");
 }
 
 void TrackComponent::zoomOutButtonClicked()
 {
-    currentZoom /= 1.5;
-    currentZoom = juce::jmax(currentZoom, 0.1);
+    currentZoom = juce::jlimit(0.1, 20.0, currentZoom / 1.5);
     
     if (waveformDisplay)
     {
         waveformDisplay->setZoomFactor(currentZoom);
     }
     
-    juce::Logger::writeToLog("Track " + juce::String(trackNum + 1) + " zoom: " + juce::String(currentZoom, 1) + "x");
+    juce::Logger::writeToLog("Track " + juce::String(trackNum + 1) + " zoom: " + juce::String(currentZoom, 1) + "x" +
+                            (currentZoom > 1.01 ? " (drag waveform to pan)" : ""));
 }
 
 void TrackComponent::onWaveformBPMChanged(double bpm)
@@ -1528,9 +2053,17 @@ void TrackComponent::updateTrackInfo()
         {
             bpmLabel.setText("BPM: --", juce::dontSendNotification);
         }
-            
+        
         waveformDisplay->setPlayPosition(audioTrack->getCurrentPosition());
         stretchSlider.setValue(audioTrack->getStretchRatio(), juce::dontSendNotification);
+        
+        // Update loop indicator based on whether there's a custom loop region
+        if (audioTrack->hasLoopRegion())
+        {
+            double loopDuration = audioTrack->getLoopEnd() - audioTrack->getLoopStart();
+            juce::String loopInfo = "Loop: " + juce::String(loopDuration, 1) + "s region";
+            // We could add this info to a label if desired
+        }
     }
     else
     {
@@ -1561,6 +2094,10 @@ void TrackComponent::updateWaveform()
                                        audioTrack->getDurationInSeconds() * 44100.0);
         waveformDisplay->setDuration(audioTrack->getDurationInSeconds());
         waveformDisplay->setDetectedBPM(audioTrack->getDetectedBPM());
+        
+        // Reset zoom when loading new waveform
+        currentZoom = 1.0;
+        waveformDisplay->setZoomFactor(currentZoom);
     }
 }
 
@@ -1667,6 +2204,18 @@ void TrackComponent::onWaveformPositionChanged(double position)
     if (audioTrack)
     {
         audioTrack->setPosition(position);
+    }
+}
+
+void TrackComponent::onWaveformSelectionChanged(double startTime, double endTime)
+{
+    if (audioTrack)
+    {
+        audioTrack->setLoopRegion(startTime, endTime);
+        
+        juce::Logger::writeToLog("Track " + juce::String(trackNum + 1) +
+                                " loop region set: " + juce::String(startTime, 2) + "s - " + juce::String(endTime, 2) + "s | " +
+                                "Will loop only this region when playing");
     }
 }
 

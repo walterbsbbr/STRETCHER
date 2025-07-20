@@ -17,6 +17,7 @@ public:
     void mouseDrag(const juce::MouseEvent& event) override;
     void mouseMove(const juce::MouseEvent& event) override;
     void mouseExit(const juce::MouseEvent& event) override;
+    void mouseUp(const juce::MouseEvent& event) override;
     
     void setWaveformData(const std::vector<float>& peaks, double sampleRate, int totalSamples);
     void setPlayPosition(double positionInSeconds);
@@ -30,8 +31,16 @@ public:
     double getZoomFactor() const { return zoomFactor; }
     double getDetectedBPM() const { return detectedBPM; }
     
+    // Selection methods
+    void setSelectionRange(double startTime, double endTime);
+    void clearSelection();
+    bool hasValidSelection() const { return hasSelection && selectionEnd > selectionStart; }
+    double getSelectionStart() const { return selectionStart; }
+    double getSelectionEnd() const { return selectionEnd; }
+    
     std::function<void(double)> onPositionChanged;
     std::function<void(double)> onBPMChanged;
+    std::function<void(double, double)> onSelectionChanged;
 
 private:
     std::vector<float> waveformPeaks;
@@ -54,6 +63,23 @@ private:
     double initialGridTime;
     juce::MouseCursor currentCursor;
     
+    // Pan/scroll for zoom navigation
+    bool isDraggingWaveform;
+    double initialViewStartTime;
+    int panStartX;
+    
+    // Selection for loop regions
+    bool isSelecting;
+    bool hasSelection;
+    double selectionStart;
+    double selectionEnd;
+    double selectionStartX;
+    
+    // Selection edge resizing
+    bool isResizingSelectionStart;
+    bool isResizingSelectionEnd;
+    double fixedSelectionBound;
+    
     void updatePositionFromMouse(const juce::MouseEvent& event);
     void drawGrid(juce::Graphics& g, const juce::Rectangle<int>& area);
     void drawBeatLines(juce::Graphics& g, const juce::Rectangle<int>& area);
@@ -63,6 +89,7 @@ private:
     void updateCursor(const juce::MouseEvent& event);
     double timeToPixel(double timeInSeconds, const juce::Rectangle<int>& area) const;
     double pixelToTime(int pixelX, const juce::Rectangle<int>& area) const;
+    bool isNearSelectionEdge(int mouseX, const juce::Rectangle<int>& area, bool& nearStart, bool& nearEnd);
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
 };
@@ -97,6 +124,13 @@ public:
     void setLooping(bool shouldLoop) { looping = shouldLoop; }
     void autoSyncToMaster();
     
+    // Selection-based looping
+    void setLoopRegion(double startTime, double endTime);
+    void clearLoopRegion();
+    bool hasLoopRegion() const { return hasCustomLoopRegion; }
+    double getLoopStart() const { return loopStartTime; }
+    double getLoopEnd() const { return loopEndTime; }
+    
     bool isMuted() const { return muted; }
     bool isSolo() const { return solo; }
     float getVolume() const { return volume; }
@@ -120,6 +154,11 @@ private:
     bool solo;
     bool looping;
     float volume;
+    
+    // Loop region selection
+    bool hasCustomLoopRegion;
+    double loopStartTime;
+    double loopEndTime;
     
     juce::CriticalSection lock;
     
@@ -166,6 +205,7 @@ private:
     juce::TextButton bpmEditButton;
     juce::TextButton zoomInButton;
     juce::TextButton zoomOutButton;
+    juce::TextButton clearSelectionButton;
     juce::Slider volumeSlider;
     juce::Slider stretchSlider;
     juce::Label trackLabel;
@@ -187,10 +227,12 @@ private:
     void bpmEditButtonClicked();
     void zoomInButtonClicked();
     void zoomOutButtonClicked();
+    void clearSelectionButtonClicked();
     void volumeSliderChanged();
     void stretchSliderChanged();
     void onWaveformPositionChanged(double position);
     void onWaveformBPMChanged(double bpm);
+    void onWaveformSelectionChanged(double startTime, double endTime);
     void showBPMEditor();
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackComponent)
